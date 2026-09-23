@@ -6,6 +6,7 @@ string bus
 ---
 bool success
 string message
-uint8[] data                       # 原始 JSON 字节
-uint32 crc                         # 设备给的 VersionCRC（0 = 未知/来自缓存）
+uint8[] data                       # 原始 JSON 字节（与 ImportDescriptor.data 成对）
+uint16 crc                         # 设备给的描述符 VersionCRC（0 = 未知/来自缓存）
+                                  # ⚠ uint16：与 SDK 的 jsdk_desc_hint_t.crc 同宽，不要放宽
 uint32 fw_version

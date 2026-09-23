@@ -539,7 +539,7 @@ stateDiagram-v2
 | `GetDeviceInfo` | `string bus`, `string joint` | `{hw_version, fw_version, serial, classic}` |
 | `GetBusStats` | `string bus` | `BusStatus` 同构 |
 | `GetDescriptorInfo` | `string bus` | `{total_len, crc, fw_version, endpoint_count, parsed_total, frames_rx, complete, mode_used, shared_hit, from_cache}` |
-| `ExportDescriptor` / `ImportDescriptor` | `string bus`, 字节数组 / 路径 | 产线预烧与离线检查 |
+| `ExportDescriptor` / `ImportDescriptor` | `string bus` → `uint8[] data` + `uint16 crc` + `uint32 fw_version`；导入再加 `uint16 crc` / `uint32 fw_version`（**必填的语义**）与 `bool persist` | 产线预烧与离线检查。⚠ `crc`/`fw_version` 是**设备侧属性**，从 JSON 正文推不出来 —— SDK 的 `jsdk_context_desc_import_raw()` 要求 hint **非空**（`!hint` ⇒ `INVALID_ARG`，值可为 0）。⚠ `persist`（写设备 Flash）**本 SDK 版本无此能力** ⇒ 传 true 会被**明确拒绍**（不静默忽略）。响应里 `crc` = 版本 CRC（回显），`data_crc32` = 导入字节的 CRC32（两者不是一回事） |
 | `Jog` | `string joint`, `float64 position`, `float64 kp/kd/torque`, `float64 duration_s`（硬上限 10 s）, `bool confirm` | 限时 + 需确认；对标 CLI 的 `--yes --hold`；返回实际执行时长与退出原因 |
 | `PublishHeartbeatHint` | `string bus`, `uint32 rate_ms`, `bool persist` | **不自动执行**：只回建议值与影响评估（帧/秒、总线占用增量）（ADR-5/§8.5） |
 
@@ -936,7 +936,7 @@ CI：三发行版容器矩阵；每发行版跑 `colcon build` + 单元/集成�
 因此 **WP4 的收尾 = 上述三条 + 4/5 工具**；**不算进收尾**的三项如实登记：
 - `jr_latency_bench`（P1：实时性能要有真机才有意义）；
 - `jr_hw_verify --write-probe`（写进 `--help` 的**非目标**：体检工具不写设备，保持只读）；
-- §13.4 的两条偏差（`ImportDescriptor`/`ExportDescriptor` 载荷格式不一致；`calib`/`home` 真机路径未验证）。
+- §13.4 的偏差只剩一条：`calib` / `home` 的**真机**路径未验证（`ImportDescriptor` 往返已在 v0.15 修好并加了回滚护栏）
 
 ---
 
@@ -1119,7 +1119,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | `--help` | rc=0，且**不需要 DDS**（在 `rclcpp::init` 之前处理） | rc=0；用法里写明退出码约定（0/1/2/4） |
 | 闸门：`write` / `save` / `reset` / `desc-import` / `node-id` / `jog` 不带 `--confirm` | rc=2 且**真的没写设备** | 全部 rc=2；`jog --duration-s 20` 也被拒（硬上限 10 s） |
 | `write` 写回原值 | rc=0，且打印 `requested/value/verified` 三段 | rc=0；`verified=true`（**写后必须读回再下结论**） |
-| `desc-export` → `desc-import` | 见 §13.4：**目前接不上**（导出格式 ≠ 导入要求的原始 JSON） | 导出 3115 B（crc=`0xfa7d`，fw=`0x00000506`）；导入如实失败（rc=1 + 原因），**用例断言的就是“它会失败”** |
+| `desc-export` → `desc-import` | 往返必须成立（v0.15 修好：真因是核心库把 SDK 的 `hint` 传成 `nullptr`，而 SDK 要求 hint **非空**） | ✓ 导出 3115 B（crc=`0xfa7d`，fw=`0x00000506`）→ 导入 rc=0、`device_reconfigured=1`；**证伪**：截断 JSON 必失败（rc=1）、`--persist` 必被明确拒绝（rc=1）、**失败导入之后 `read`/`write` 仍可用**（回滚护栏，§13.3-39） |
 | `ep-lookup` 不存在的路径 | rc=1 且**不猜** | rc=1；message 明说 `no approximate matching`，并给出脚本可判别的 `found=false` |
 | `calib` / `home`（虚拟设备） | 见 §13.4：仿真不实现这两个状态机 ⇒ **如实失败** | rc=1 + `CAN_BUS_FAILED` 原文与被拒绝的状态号（3 / 11） |
 | 节点被 kill 之后 | 回到 rc=4（不留半死状态） | rc=4 |
@@ -1424,6 +1424,43 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
     - 可复用的自查问句：**“这条等待断言在跑满超时时会打印什么？”** —— 答案是
       “什么都不打印”的，就是漏的（`ok` 必须在 `if/else` 里，不能在循环里）。
 
+38. **“两个服务接不上”——结果是我们把 SDK 的必填参数传成了 `nullptr`（v0.15；⚠ 原先的归因是错的）**：
+    现象：`ExportDescriptor` 导出的 3115 B 再喂给 `ImportDescriptor` 必然失败（`invalid-argument (deactivated)`）。
+    v0.14 我据此把根因记成“**导出格式 ≠ 导入要求**”（写进了 §13.4 与提交信息）—— **这是错的**。
+    真因在 SDK 头文件里一句话：`jsdk_context_desc_import_raw(ctx, json, len, hint)` 写着
+    “`@param hint 必需。传 NULL 返回 JSDK_ERR_INVALID_ARG`”，源码第一句就是
+    `if (... || !hint) return JSDK_ERR_INVALID_ARG;`。而我们的核心库**恰恰传了 `nullptr`**，
+    注释还把“省略 hint”和“用当前 filter 重新解析”混为一谈（**那是两件事**）。
+    ⇒ 三条可复用的教训：
+    ① **别从症状反推格式**：两个接口“接不上”时，先读**被调 API 的前置条件**（文档 + 实现的第一句），
+       而不是先猜“两边序列化格式不一致” —— 后者听上去很像、实际是另一回事，还会掩盖真因。
+    ② **自己的解释性文案不能是猜测**：当时那句“payload must be the raw JSON… compatible firmware”
+       是我们自己补的，把排查带偏；带上 SDK 原文（`(deactivated)`）是对的，但补的解释必须改成
+       陈述**已知前置条件**（现在就是：hint 必需、值可为 0）。
+    ③ **契约里写了但没实现的字段，必须明确拒绍**：同一个服务里的 `persist`（“写设备 Flash”）
+       当时**根本没读** ✗ —— 静默忽略会让客户以为“已经预烧进设备了”。
+    修完的往返用例：导出 → 导入（带 crc/fw hint）→ 服务重新 `configure` 成功；
+    另加两条证伪：**截断的 JSON 必须失败**、**`--persist` 必须被明确拒绍**。
+
+39. **失败的描述符导入会把描述符废掉 —— 真因在 SDK 的 `store_init()` 位置，我们的护栏是回滚（v0.15）**：
+    导入一个**截断**的 JSON（手误传错文件就够了）之后，这个进程的端点表**整个消失**：
+    `ep-list` 不再匹配、`read`/`write` 的文本路径报“找不到端点”，而 `enable`/`zero` 这类
+    **不依赖描述符**的命令照常工作 —— 症状极具误导性（看着像“参数类型不支持”）。
+    - 探针逐段对比（①基线 ②成功导入后 ③**失败**导入后 ④再 configure）证实：①② 正常（`matched 41`）、
+      ③ 表没了、**④ 再 configure 也救不回来**。
+    - 真因：`jsdk_context_desc_import_raw()` 先 `store_init(ctx)`（清 store）**再**解析
+      （`jsdk_desc.c:680/688`），解析失败即返回；而之后 `configure()` **不会再下载**
+      （SDK 认为“描述符已存在”）⇒ 没有任何自愈路径。
+    - 修法（产品级护栏，不是把测试顺序绕开）：导入前先备好**现役描述符**（我们手里的 JSON + 它的
+      crc/fw），失败时**原样回滚**（再 `import_raw` 一次）并让调用方重新 `configure()` 重新解析；
+      回滚不成功时**如实说明**（“描述符已被摧毁且无本地副本 ⇒ 重新打开总线/重启节点”，
+      不假装 configure 能救）。
+    - 证伪用例：**失败导入之后 `read`/`write` 必须仍然可用** —— 断言的不是“它会失败”，而是
+      “一次坏输入不许把好状态废掉”。实测 `jr_ctl_services`：**68 项检查 / 0 失败**。
+    - 顺带修掉一个误导源：`WriteParams` 里 `lookup_endpoint()` 失败时**静默保留 `kUnsupported`**
+      ⇒ 上层报“unsupported parameter type”，真因（端点不在表里）被丢掉。现在把
+      `lookup_endpoint` 的原因直接写进错误里 —— **报错必须指向真因**（与 §13.3-38 同一课）。
+
 #### 发行版签名判定：证伪记录（2026-09-22）
 "守卫有牙齿"这件事必须用**变异**证明，不能靠"我写了个 static_assert"：
 
@@ -1474,7 +1511,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | §11 曾写“`jr_hw_verify --if virtual` 在 CI 中可跑” | §11 WP4 行的验收口径 | **已改为与实现一致的表述**：后端由配置里的 `type:` 决定（`jr_hw_verify --config <file>`），**没有** `--if` 开关；"虚拟总线可进 CI"这个**能力**是达成的（`tools_virtual`/`jr_ctl_services` 跑的就是虚拟总线，三发行版绿） | 承诺的**写法**与实现不一致时，要改的是文案 —— 但**先确认能力真的达成了**，别把“没做”伪装成“表述问题”。`jr_gen_config` 保留 `--if <kind>` 是另一回事：它没有配置可读，只能命令行给后端 |
 | `jr_gen_config` 的输出 | 未涉及 | **已实现（v0.12）**：扫总线 → 生成 §6.4 YAML → **当场回读自检**（parse + validate + plan_bus），自检不过**不落盘** | 读不回来的项（`master_id`、无设备信息时的 `is_fd`）用默认值 + 文件头注释点名“请核对”；`stiffness/damping` **故意不写** —— 那是控制器增益（属机械+负载），拿设备上限当默认等于把客户往最激进的方向推 |
 | `jr_ctl` / `jr_bus_plan` / `jr_latency_bench` | WP4 承诺 5 个工具 | **v0.14：`jr_ctl` 与 `jr_bus_plan` 已实现**（§11 WP4 行）；`jr_latency_bench` 仍未实现（P1，要有真机才有意义） | `jr_ctl` 走服务、依赖运行中的节点（ctest `jr_ctl_services`：真起 `jr_bus` + configure/activate + 19 个服务）；`jr_bus_plan` 的**模型**本来就在核心库里（`plan_bus()` 被节点/组件/体检/生成器共用），只差一个薄 CLI |
-| `ImportDescriptor` 与 `ExportDescriptor` 的**载荷格式不一致** | §6.2 把它们当一对“产线预烧 + 离线检查” | **导出的是 SDK 的二进制导出格式，导入要求的是原始 JSON** ⇒ 两个服务目前**接不上**（实测：导出的 3115 B 再导回去被拒：`The payload must be the raw JSON captured by ExportDescriptor…`）。`jr_ctl` 的用例**如实断言它会失败**并附理由，修好后要把那行反过来（§13.2d） | 要么导出改为吐原始 JSON，要么导入接受导出格式；先把不一致记下来，不假装它能往返 |
+| `ImportDescriptor` 与 `ExportDescriptor` | §6.2 把它们当一对“产线预烧 + 离线检查” | ⚠ **v0.14 的诊断（“导出格式 ≠ 导入要求”）是错的**：真因是核心库把 SDK 的 `hint` 传成 `nullptr`（SDK 要求 hint 非空）。**已修（v0.15）**：hint 进 `DescHintPOD`。另外发现**失败的导入会摧毁描述符**（SDK 的 `store_init()` 在解析之前，且 configure 不再下载）⇒ 加了**回滚护栏**（§13.3-39） | `persist`（写设备 Flash）本 SDK 无此能力 ⇒ 现在**明确拒绝**（此前静默忽略）。`calib`/`home` 的**真机**路径仍待验证 |
 | `calib` / `home` 在**虚拟设备**上无法成功 | §6.2 描述其前置条件与读回语义 | 实测：设备在标定状态 3 / 回零状态 11 里报 `CAN_BUS_FAILED`（仿真不实现这两个状态机）。`jr_ctl` 的用例**如实断言 rc=1 且给出原因**（不把断言放宽到看不出异常），并把这两条排在最后（但它们会“毒死”后面的设备操作） | 真机上的成功路径仍未验证；虚拟设备上的正确断言就是“会失败并且说清原因” |
 | `MitCommand.enable` | §6.1 允许"本条命令同时请求使能" | **未实现**：命令路径里做使能需要 ADR-7 安全暂停（阻塞），属配置类操作 → 节点**明确告警**并指向 `SetEnabled` 服务/`safety.auto_enable` | 静默忽略会让人以为"发了 enable 所以使能了" |
 | `command.interpolation=linear` | §6.4 有该键 | **已实现（v0.13）**：核心库在 tick 上把**运动量**线性推到新目标（段长 = **实测**的命令间隔，夹在 [0.5 ms, 200 ms]）。新增可观测面 `BusRuntime::applied_target()`（"实际下发的目标"，诊断也用它） | 只插运动量、**不插**增益与限制量（增益不是轨迹）；**首条命令、以及 estop/hold/zero_torque 之后的第一条命令**都**立即**生效（从 0 慢慢爬上去是安全问题） |
@@ -1498,6 +1535,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | v0.6 | 2026-09-22 | **WP3（`ros2_control`，P0 最优先）落地**：新增 `jr_ros2_control`（`SystemInterface`，`tick_source=internal|controller_manager`、`gain_mode=wire|si`、生命周期与安全落点、`compat/` 集中发行版差异）与 `jr_config_yaml`（与节点/工具**共用**的 §6.4 YAML schema，未知键报错）；`jr_core` 增加**外部驱动 tick**（`start_external()`/`step()`，与内部线程模式共用同一条 `run_cycle()`）。**Jazzy 与 Humble 双双实测绿**（组件测试 74 断言；`colcon test` 11 tests / 0 failures）。期间修掉真问题：外部模式**永远无法使能**的守卫自相矛盾（§13.3-15）、`jsdk::can` 别名缺失、ament 导出集顺序导致的 `jr_ros2::jr_core` 找不到、静态库缺 `-fPIC`。§13.2 补 WP3 行，§13.3 增至 16 条。**待办**：`JointTrajectoryController` 端到端示例（WP7 的一部分）尚未跑，列为下一步。 |
 | v0.7 | 2026-09-22 | **主目标发行版 Lyrical 打通 + JTC 端到端（三发行版）**：新增 `docker/run.sh lyrical`（Ubuntu 26.04 / gcc 15.2 / **CMake 4.2.3**）；`jr_ros2_control/test/jtc_demo/`（`robot_state_publisher` + `controller_manager` + JSB/JTC + 虚拟总线，发 1.5 s 轨迹并断言终点误差）在 **Humble / Jazzy / Lyrical 三发行版全部 PASS**（终点误差 0.008 rad，三边数值一致）。期间修掉四个真问题：① 签名判定**不能用 CMake 探测**（`check_cxx_source_compiles` 的迷你工程拿不到传递 include → 三发行版全探测失败，且失败时变量是**空串** → 静默走错分支 → Humble 才爆；改为 `__has_include` + 静态断言，并用变异测试证明守卫「会响」，§13.3-18/19）；② CMake 4 起含 C 源的包必须 `project(x C CXX)`（§13.3-17）；③ 基础镜像与 apt 仓库**错批**导致运行期 `undefined symbol`（构建全绿也照挂）→ 镜像里先 `apt-get upgrade`（§13.3-20）；④ 控制器参数必须 `spawner --param-file` 显式传（Lyrical 不再继承 CM 全局参数，§13.3-21）。§9.1 回填 Lyrical 实测基线，§13.2 增 Lyrical 列与 JTC 证据表（13.2b），风险 U1 关闭、U3 缓解。 |
 | v0.8 | 2026-09-22 | **WP2 第一段落地（`jr_interfaces` + `jr_bus` 节点）**：新增 `jr_interfaces`（**16 msg + 19 srv**，只依赖 `std_msgs`/`builtin_interfaces`）与节点层目标 `jr_node`/可执行 `jr_bus`（一个节点 = 一条总线）：配置加载与校验、`open→configure`、`~/cmd_mit`/`~/estop`/`/jr/estop_all` → 无锁信箱、快照 → `joint_feedback`/`joint_states`/`bus_status`/`rt_stats`/`faults`、退出序列（含 SIGINT 走同一条 lifecycle 路径）。**三发行版实测**：`ctest` 10/10、`colcon test` **17 tests / 0 failures / 0 告警**、JTC 端到端 PASS、节点级测试（真 DDS）PASS。核心库补齐 `RtStats` 的 min/mean（§6.1 承诺的字段不能空着）。期间撞到并修掉：① **核心库真 bug：快照从不填关节名**（节点测试按名字找关节时立刻暴露；货已发给客户就是"话题里全是空字符串"，已加回归断言）；② rosidl 包的 `package.xml` **组名与元素顺序**两个坑（`ament_xmllint`）；③ 节点测试曾用 `tx_frames` 绝对值断言"没发控制帧"（configure 阶段的描述符/参数帧也在里面 → `got 29, expected 0`）→ 改为**增量**口径；④ 容器脚本失败时把 `colcon test` 明细吞掉了（`set -e`），现在先打 `--verbose` 明细再退出；⑤ 两处 WP3 时期遗留的告警（`-Wconversion`、新发行版 `return_type::DEACTIVATE` 的 `-Wswitch`）。§13.2 增 13.2c（节点级证据表），§13.4 补 WP2 偏差。**待办**：服务层（19 个服务 + ADR-7 安全暂停 + §8.5 写闸门）、§6.5 诊断、§10.2 剩余用例（双 master/描述符中断/广播降级）。 |
+| v0.15 | 2026-09-23 | **收掉 WP5 的最后一项（描述符往返），并修掉它顺手暴露的两个真问题；同时更正 v0.14 的一处误判**。真因：`jsdk_context_desc_import_raw()` 的 `hint` 是**必填**（`!hint ⇒ JSDK_ERR_INVALID_ARG`，头文件与源码第一句都写了），而我们传了 `nullptr` ⇒ “导出→导入”永远失败；v0.14 把它归因成“导出格式 ≠ 导入要求”是**错的**（§13.3-38 记了三条可复用的教训：别从症状反推格式、自己的解释性文案不能是猜测、契约里写了但没实现的字段要明确拒绝）。改动：`DescHintPOD{crc,fw}` 进核心库的 `import_descriptor()`；`ImportDescriptor.srv` 增加必填语义的 `crc`/`fw_version` 与响应 `data_crc32`（把“版本 CRC”与“数据 CRC32”分开 —— 此前两者都叫 `crc`）；`ExportDescriptor.srv` 的 `crc` 收窄为 `uint16`（与 SDK 的 `jsdk_desc_hint_t` 同宽）；`persist`（写设备 Flash）**明确拒绝**（SDK 没有这个能力，此前是**静默忽略**）。**第二轮（同日，被新用例暴露出来的）**：导入一个**截断**的 JSON 会把内存里的描述符**整个废掉** —— SDK 的 `store_init()` 在解析**之前**执行，而 `configure()` 不会再下载（探针四段对比：①② 正常（`matched 41`）、③ 表没了、④ 再 configure 也救不回来）⇒ 加**回滚护栏**（失败时用现役 JSON + 它的 crc/fw 原样恢复一次；回滚不成则**如实说明**“描述符已被摧毁且无本地副本 ⇒ 重开总线/重启节点”），并让服务在“描述符被改动过”时都重新 `configure()` 重新解析；顺带把 `WriteParams` 里 `lookup_endpoint()` 失败**静默退回 `kUnsupported`** 的误导（上层报“类型不支持”、真因却丢失）改成**就地报真因**。**实测**：`jr_ctl_services` **68 项检查 / 0 失败**（含三条证伪：截断 JSON 必失败、`--persist` 必被拒、**失败导入之后 `read`/`write` 仍可用**）；三发行版 `bash docker/run.sh <distro>` **全 rc=0**（`ctest` 12/12、`colcon test` 21 tests / 0 failures、JTC 端到端 mit + csp PASS）；本机（无 ROS）**10/10**；§13.3-39 / §13.2e / §13.4 已同步（§13.4 里那条“载荷格式不一致”的旧归因已标注为**误判**） |
 | v0.14 | 2026-09-23 | **WP4 收尾：`jr_bus_plan` + `jr_ctl` 落地**（至此 5 个承诺工具中 4 个已实现；只剩 P1 的 `jr_latency_bench`）。`jr_bus_plan`：非 ROS 薄 CLI，复用核心的 `plan_bus()` 报每条总线的负载/帧率/每拍耗时与是否可行（rc=0 可行 / 1 不可行 / 2 用法），与 `jr_hw_verify`/`jr_gen_config` 共用 `tools_virtual`。`jr_ctl`：对标 `jsdk-cli` 但**只走服务**（因此可以在节点跑着的时候用），19 个子命令覆盖读/写/使能/标定/回零/点动/复位/node-id 等，退出码约定 0 成功 / 1 操作失败 / 2 用法 / **4 服务不可达**。**三发行版实测**：`ctest` **12/12**、`colcon test` **21 tests / 0 failures**、JTC 端到端 mit + csp 仍 PASS。期间撞到并修掉六件事（§13.3-36）：① **多读者三缓冲撕裂读**（大坑，见下）；② 生命周期节点**没有 autostart** —— `ros2 run` 只是“活着”但不建服务，必须先 `configure` 再 `activate`（否则 `jr_ctl` 全部 rc=4）；③ 设计表里写的是**类型名**（`SetEnabled`），节点实际注册的是 **snake_case**（`~/set_enabled`）⇒ `jr_ctl` 要转换，且**排障以 `ros2 service list` 为准**；④ CMake 里必须用 `rclcpp::rclcpp` 而不是裸 `rclcpp`（后者只给了文件名、没给 include 路径）；⑤ 测试里工作区 `setup.bash` 不能从二进制路径推（测试跑在 build 树里，install 是**兄弟目录**）⇒ 由 CMake 从 `CMAKE_INSTALL_PREFIX` 算好后用环境变量传给测试；⑥ 位置参数要**按子命令**解释（`node-id <joint> <new_id>` 的第一个位置参数是关节名，而 `desc-export <file>` 是文件名）—— 混了就是 `joint '' is not on bus`（报错点离病因很远）。另外把 `WriteParams` 的空 `joint` 语义补上（**空 = 总线唯一关节**，多关节必须点名，绝不猜）。**未实现**：`jr_latency_bench`（P1）；`ImportDescriptor` 与 `ExportDescriptor` 载荷格式不一致（已如实登记，§13.4）。**收尾补账（同日）**：① §11 验收口径第③条（“生成的 YAML 能被节点直接加载”）此前只证到**加载器**级别 ⇒ 新增 `jr_ctl_services` 第 ⑦ 段真跑“生成 → 起 `jr_bus` → configure+activate → 认出只存在于生成文件里的关节 `j3`”，并用 `ctest -V` 数出 **60 项检查 / 0 失败**（`ctest` 对通过的用例不打印输出，所以“条数”必须另跑一次 `-V` 拿）；② §11 里“`jr_hw_verify --if virtual`”这个**写法与实现不符**（实现是后端由配置 `type:` 决定）⇒ 改文案（能力本身是达成的，先确认了这一点才改）；③ 自查发现两条“**永远不会红**”的等待循环（`… && break` 循环后看 `$?`，跑满时取到 `sleep` 的 0）⇒ 改成显式标志位，其中一条是**既有**用例里的旧洞 |
 | v0.13 | 2026-09-23 | **清掉 §13.4 的两条小账**：① 非 MIT 关节的配置告警改为**同时**指出两条合法路径（`~/cmd` 与 ros2_control）—— 此前只说 `~/cmd`，会让 ros2_control 客户去翻一个跟他无关的话题；② `command.interpolation=linear` **真正落地**（此前只是“解析了但行为 = none”）。插值实现放在**核心 RT 路径**（`BusRuntime::apply_command()`）：段长 = **实测**的相邻命令间隔（夹在 [0.5 ms, 200 ms]，即“控制器周期”），只插**该模式承载的运动量**（MIT 的 pos/vel/tau、CSP 的 pos、CSV 的 vel、CST 的 tau、CURRENT 的 A），**不插**增益与限制量（增益不是轨迹）；**首条命令**以及 **estop / hold / zero_torque 之后的第一条命令**一律**立即**生效（从 0 慢慢爬上去是安全问题）。`command.interpolation` 从“节点层键”变为 `Config::command` 的字段（节点与 ros2_control 共用），由 `TickGroup::open_buses()` 统一接进每条总线。新增可观测面 `BusRuntime::applied_target()`（本 tick 实际下发的目标；诊断与测试共用）。**实测**（本机 10/10、**523 断言**，+14）：新用例把目标序列逐拍打出来 —— `0.300 → 0.236 → 0.172 → 0.108 → 0.044 → … → -0.200`（等差 = 真的线性），首条命令 0.3000 立即到位，关掉插值后 0.2500 立即到位。期间撞到两件事（§13.3-35）：① `TickGroup::step()` **不吃时间**（连跑 10 拍只几十微秒）⇒ 不 sleep 的采样循环永远看到起点值，看着像“插值没生效”；② 控制帧其实是 **16 字节**（`len=16 id=0x0a000807`），按“MIT 单播 = 8 字节”过滤会抓到参数帧 ⇒ 改为暴露 `applied_target()`，不在测试里反解线格式。 |
 | v0.12 | 2026-09-23 | **WP4 首批工具落地：`jr_hw_verify` + `jr_gen_config`**（**非 ROS**、直连总线，因此能进 CI 与 Windows 开发机）。共用扫描层 `rt::identify_bus()`（`jr_identify.hpp/.cpp`）：发现节点 + 读设备身份/量程；`jr_hw_verify` 按层给结论（L1 配置 / L2 打开（锁+ABI）/ L3 发现（配置声明 ↔ 线上应答**双向**）/ L4 描述符+量程+标定 / L5 心跳与看门狗（`0 = 禁用`）/ L6 一致性+预算），**只读**、不使能、不发控制帧；`jr_gen_config` 扫总线 → 生成 §6.4 配置 → **当场回读自检**（`parse_config_yaml` + `validate_config` + `plan_bus`），自检不过**不落盘**；读不回来的项（`master_id`、无设备信息时的 `is_fd`）写默认值 + 注释点名“请核对”，`stiffness/damping` **故意不写**（那是控制器增益，设备里没有）。**三发行版实测**：`ctest` **12/12**（新增 `tools_virtual`）、`colcon test` **20 tests / 0 failures**、JTC 端到端 mit + csp 仍 PASS；本机（无 yaml-cpp，工具不参与）仍 **10/10、509 断言**。期间撞到并修掉四件事（§13.3-34）：① `BusRuntime::open()` 用 `plan_bus()` 拒掉 0 关节总线，而“扫描时还不知道有几个关节”正是该场景 ⇒ 加 `OpenOptions::allow_empty_scan_bus`（默认关闭，跳过预算时**写明“没查”**）；② 识别层“只发现”时顺手 `add_joint()` 会让运行时的 `configure()` 仍看到 0 关节 ⇒ **量程静默全 0** ⇒ 加关节收进 `read_config=true` 分支；③ 生成器的“生成→回读”自检**当场抓到自己的 bug**（`tick_groups[].cpu` 是有符号 int，默认 -1 被打成 `%u`）；④ 用 `names.empty()` 当“用户没给 `--names`”的判据 ⇒ 第二次循环越界 assert 崩掉。§13.2d 记了逐条期望/实测（含两处变异）。**未实现**：`jr_ctl` / `jr_bus_plan` / `jr_latency_bench`（§13.4 如实登记；`jr_hw_verify` 的写参数往返 `--write-probe` 也未实现，`--help` 里写明） |

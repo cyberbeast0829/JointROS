@@ -1046,14 +1046,22 @@ void JrBusServices::on_write_params(const jr_interfaces::srv::WriteParams::Reque
             /* ① 文本路径（推荐）：先查描述符拿到**声明类型**，再按它解析（超值域就拒）。 */
             EndpointInfo ep;
             Result lr;
-            if (bus().lookup_endpoint(it.path, &ep, &lr) == Status::kOk) {
+            if (bus().lookup_endpoint(it.path, &ep, &lr) != Status::kOk) {
+                /* ⚠⚠ 这里**绝不能**静默退回 `kUnsupported`：上层会报“unsupported parameter
+                   type”，而真实原因（端点不在表里 / 总线没打开 / 描述符还没解析完…）被丢掉
+                   ⇒ 排障被带偏（实测踩过，§13.3-39）。宁可在这里就把原因说清楚。 */
+                parse_errors[i] = std::string("cannot use a text value: '") + paths.back() +
+                                  "' is not resolvable in the endpoint table (" + lr.message +
+                                  "). Pass a number together with an explicit type, or fix the "
+                                  "path/descriptor first.";
+            } else {
                 it.declared_type = ep.type;
-            }
-            char e[128] = {};
-            it.requested.type = it.declared_type;
-            if (parse_param_text(it.declared_type, w.text_value.c_str(), &it.requested, e, sizeof(e)) !=
-                Status::kOk) {
-                parse_errors[i] = e;
+                char e[128] = {};
+                it.requested.type = it.declared_type;
+                if (parse_param_text(it.declared_type, w.text_value.c_str(), &it.requested, e,
+                                     sizeof(e)) != Status::kOk) {
+                    parse_errors[i] = e;
+                }
             }
         } else {
             /* ② 类型化路径：按调用方给的类型装箱。 */
@@ -1349,6 +1357,17 @@ void JrBusServices::on_import_descriptor(
         resp->message = "ImportDescriptor replaces the endpoint table: pass confirm=true (DESIGN §8.5)";
         return;
     }
+    /* ⚠ `persist` **不支持**（SDK 没有任何“把描述符写进设备”的 API，§13.4）。
+       静默忽略会让客户以为“已经预烧进设备了”—— 所以这里**明确拒绝**。 */
+    if (req->persist) {
+        resp->success = false;
+        resp->device_reconfigured = false;
+        resp->message =
+            "persist=true is not supported: this SDK version has no API to write a descriptor into "
+            "the device (the descriptor is owned by the device firmware). Import only affects this "
+            "process (endpoint table + local cache). See DESIGN §13.4.";
+        return;
+    }
     if (req->data.empty()) {
         resp->success = false;
         resp->message = "data must not be empty (pass the bytes from ExportDescriptor)";
@@ -1367,17 +1386,25 @@ void JrBusServices::on_import_descriptor(
         return;
     }
     Result r;
-    const Status st = bus().import_descriptor(req->data.data(), req->data.size(), &r);
+    bool needs_reconfig = false;
+    /* hint 必需（SDK 的 `!hint ⇒ INVALID_ARG`）：把 ExportDescriptor 的 crc/fw 原样带回；
+       两者为 0 也**要传结构体**（“未知”是合法值，“没有”不是）。 */
+    const jr::rt::DescHintPOD hint{static_cast<std::uint16_t>(req->crc),
+                                   static_cast<std::uint32_t>(req->fw_version)};
+    const Status st =
+        bus().import_descriptor(req->data.data(), req->data.size(), hint, &r, &needs_reconfig);
     log_result(node, "ImportDescriptor", r);
-    resp->crc = DescCache::crc32(req->data.data(), req->data.size());
+    resp->crc = hint.crc;
+    resp->data_crc32 = DescCache::crc32(req->data.data(), req->data.size());
 
-    /* 描述符换了 → 必须重新 configure 才生效（端点表/量程都要重解析）。 */
-    if (st == Status::kOk) {
+    /* ⚠ 不只是“成功才重新 configure”：**失败的导入会触发回滚**（核心库的护栏，
+       SDK 的失败导入会摧毁描述符）⇒ 回滚之后同样必须重新解析，否则端点表会一直是空的。 */
+    if (needs_reconfig) {
         Result r2;
         const Status st2 = tg()->configure_buses(&r2);
         resp->device_reconfigured = (st2 == Status::kOk);
         resp->message = std::string(r.message) + (resp->device_reconfigured ? " | re-configured OK" : (" | re-configure FAILED: " + std::string(r2.message)));
-        resp->success = resp->device_reconfigured;
+        resp->success = (st == Status::kOk) && resp->device_reconfigured;
     } else {
         resp->device_reconfigured = false;
         resp->success = false;

@@ -166,13 +166,37 @@ run 0 "hb-hint（只给建议）" hb-hint --rate-ms 5
 expect "hb-hint 明确不改设备" "device_changed=0"
 run 0 "desc-export 到文件" desc-export "${WORK}/desc.json"
 [ -s "${WORK}/desc.json" ] && ok "描述符文件非空（$(wc -c < "${WORK}/desc.json") 字节）" || bad "描述符文件为空"
-# 把刚导出的描述符再导回去。
-# ⚠ 已知缺陷（§13.4，v0.14 实测）：`ExportDescriptor` 返回的是 SDK 的**二进制导出格式**，
-#   而 `ImportDescriptor` 要求的是**原始 JSON** ⇒ 两个服务目前**接不上**，
-#   这里**如实断言"它会失败"**（参数错 → rc=1）。修好之后这一行要反过来改成 run 0，
-#   并把 §13.4 的待办划掉 —— 留着这条红/绿信号，避免缺陷被悄悄忘掉。
-run 1 "desc-import（已知缺陷：导出格式 ≠ 导入要求，见 §13.4）" desc-import "${WORK}/desc.json" --confirm
-expect "且给出可读原因" "raw JSON"
+# 导出时打印的 hint（crc/fw）是**设备侧属性**，从 JSON 正文里推不出来 ⇒ 必须原样带回给导入。
+HINT_CRC="$(grep -aoE 'crc=0x[0-9a-fA-F]+' "${WORK}/last.log" | head -1 | cut -d= -f2)"
+HINT_FW="$(grep -aoE 'fw=0x[0-9a-fA-F]+' "${WORK}/last.log" | head -1 | cut -d= -f2)"
+if [ -n "$HINT_CRC" ] && [ -n "$HINT_FW" ]; then
+  ok "desc-export 打印了 hint（crc=$HINT_CRC fw=$HINT_FW）"
+else
+  bad "desc-export 没打印 crc/fw hint（导入必须带上它们）"; cat "${WORK}/last.log"
+fi
+
+# ⭐ 真正的**往返**（v0.15 修好）：导出 → 导入（带 hint）→ 服务重新 configure 成功。
+#   ⚠ v0.14 这里曾经是**断言会失败**的，而且把根因记成了"导出格式 ≠ 导入要求"（误判）：
+#   真正的原因是核心库把 SDK 的 hint 传成了 `nullptr`，而 SDK 的第一句就是
+#   `!hint ⇒ JSDK_ERR_INVALID_ARG`（CRC/fw 从 JSON 正文推不出来）—— 见 §13.3-38。
+run 0 "desc-import（导出→导入往返，带 hint）" desc-import "${WORK}/desc.json" --crc "$HINT_CRC" --fw "$HINT_FW" --confirm
+expect "导入后已重新 configure 生效" "device_reconfigured=1"
+expect "且回显了版本 CRC 与数据 CRC32" "data_crc32=0x"
+
+# 负例（证伪）：同一份文件**截断**成非法 JSON 必须失败 —— 不猜、不静默成功。
+head -c 200 "${WORK}/desc.json" > "${WORK}/broken.json"
+run 1 "desc-import（截断的 JSON 必须失败）" desc-import "${WORK}/broken.json" --crc "$HINT_CRC" --fw "$HINT_FW" --confirm
+# ⭐⭐ 证伪：**失败的导入不允许把已有描述符废掉**（v0.15 护栏）。
+#   SDK 的 `import_raw()` 先清空 store 再解析 ⇒ 失败会**摧毁**内存里的描述符，
+#   而且 `configure()` 不会再下载（SDK 认为它已存在）⇒ 实测“一次手误传错文件，之后
+#   read/write 的文本路径全废”。护栏：失败时用我们手里的那份 JSON + crc/fw **回滚**。
+run 0 "失败导入之后：read 仍可用（描述符已回滚）" read --paths axis0.config.can.heartbeat_rate_ms
+run 0 "失败导入之后：write 的文本路径仍可用" write --path axis0.config.can.heartbeat_rate_ms --value 5 --confirm
+expect "且 write 报告经读回校验" "verified="
+# 负例（证伪）：`--persist`（写设备 Flash）本 SDK 版本没有这个能力 ⇒ 必须**明确拒绝**，
+#   不能静默忽略（否则客户以为"已经预烧进设备了"）。
+run 1 "desc-import --persist 必须被明确拒绝" desc-import "${WORK}/desc.json" --crc "$HINT_CRC" --fw "$HINT_FW" --persist --confirm
+expect "且说明了原因" "not supported"
 
 echo "===== ⑤ 闸门与安全动作 ====="
 run 2 "write 不带 --confirm 必须被拒（rc=2）" write --path axis0.motor.config.gear_ratio --value 7.75

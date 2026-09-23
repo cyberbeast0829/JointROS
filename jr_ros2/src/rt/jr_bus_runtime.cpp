@@ -1219,8 +1219,10 @@ Status BusRuntime::refresh_report(Result *res) noexcept
     return st;
 }
 
-Status BusRuntime::import_descriptor(const void *json, std::size_t len, Result *res) noexcept
+Status BusRuntime::import_descriptor(const void *json, std::size_t len, const DescHintPOD &hint,
+                                     Result *res, bool *needs_reconfigure) noexcept
 {
+    if (needs_reconfigure != nullptr) *needs_reconfigure = false;
     if (ctx_ == nullptr) {
         if (res != nullptr) res->set(Status::kInvalidState, Advice::kNone, "bus '%s' is not open", bus_.name);
         return Status::kInvalidState;
@@ -1232,14 +1234,48 @@ Status BusRuntime::import_descriptor(const void *json, std::size_t len, Result *
         }
         return Status::kInvalidArgument;
     }
-    /* hint = nullptr：让 SDK 按当前 `cfg.desc` 重新解析（这正是我们想要的路线 B 行为）。 */
-    const jsdk_status_t st = jsdk_context_desc_import_raw(ctx_, json, len, nullptr);
+
+    /* ⚠⚠ 失败的导入会**摧毁**内存里的描述符：SDK 的 `jsdk_context_desc_import_raw()`
+       先 `store_init(ctx)`（清 store）再解析（`jsdk_desc.c:680/688`），解析失败就直接返回，
+       而且之后 `configure()` **不会**再下载（SDK 认为“描述符已存在”）——
+       实测（§13.3-39）：一次手误传错文件 ⇒ 之后 `read`/`write` 的文本路径全报“找不到端点”，
+       而且再 configure 也救不回来（端点表没了、SDK 又不再下载）。
+       所以：先把**现役描述符**（我们手里的 JSON + 它的 crc/fw）备好，失败时恢复回去。 */
+    const std::uint16_t prev_crc = report_.desc.crc;
+    const std::uint32_t prev_fw = report_.desc.fw_version;
+    const std::vector<std::uint8_t> prev_json = desc_json_;   /* 可能为空（来自 SDK 缓存的场景） */
+
+    const jsdk_desc_hint_t sdk_hint = {hint.crc, hint.fw_version};
+    const jsdk_status_t st = jsdk_context_desc_import_raw(ctx_, json, len, &sdk_hint);
     if (st != JSDK_OK) {
+        /* 兜一次：把上一次的描述符原样恢复回去，否则这个进程的端点表就废了。 */
+        bool restored = false;
+        if (!prev_json.empty()) {
+            const jsdk_desc_hint_t ph = {prev_crc, prev_fw};
+            restored = (jsdk_context_desc_import_raw(ctx_, prev_json.data(), prev_json.size(), &ph) ==
+                        JSDK_OK);
+        }
+        if (restored) {
+            /* 描述符内容没变，但它刚被重建 ⇒ 必须重新 configure 重新解析。 */
+            mode_ = BusMode::kIdle;
+            if (needs_reconfigure != nullptr) *needs_reconfigure = true;
+            note_append("[warn] failed descriptor import was rolled back to the previous descriptor");
+        }
         if (res != nullptr) {
-            res->set(map_status(st), Advice::kNone,
-                     "bus '%s': importing the descriptor failed: %s (%s). The payload must be the "
-                     "raw JSON captured by ExportDescriptor for a compatible firmware.",
-                     bus_.name, jsdk_status_string(st), jsdk_context_last_error(ctx_));
+            if (restored) {
+                res->set(map_status(st), Advice::kNone,
+                         "bus '%s': importing the descriptor failed: %s (%s). The previous descriptor "
+                         "was **restored**; call configure() again to re-parse it (the endpoint table "
+                         "was rebuilt by the rollback).",
+                         bus_.name, jsdk_status_string(st), jsdk_context_last_error(ctx_));
+            } else {
+                res->set(map_status(st), Advice::kNone,
+                         "bus '%s': importing the descriptor failed: %s (%s). ⚠ A failed import "
+                         "**destroys** the in-memory descriptor and it could NOT be restored "
+                         "(no local copy of the previous JSON) — re-open the bus (or restart the "
+                         "node) to download it again; configure() alone will not re-download it.",
+                         bus_.name, jsdk_status_string(st), jsdk_context_last_error(ctx_));
+            }
         }
         return map_status(st);
     }
@@ -1247,6 +1283,7 @@ Status BusRuntime::import_descriptor(const void *json, std::size_t len, Result *
                       static_cast<const std::uint8_t *>(json) + len);
     /* 描述符换了 → 之前解析出的端点表与量程都不再可信：回到 IDLE，要求重新 configure。 */
     mode_ = BusMode::kIdle;
+    if (needs_reconfigure != nullptr) *needs_reconfigure = true;
     note_append("[info] descriptor imported: the bus returned to IDLE, run configure() again");
     if (res != nullptr) {
         res->set(Status::kOk, Advice::kNone,

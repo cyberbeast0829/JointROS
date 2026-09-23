@@ -1,14 +1,25 @@
-# 导入描述符（产线预烧：把导出的字节灌进设备/本地缓存）。
+# 导入描述符（产线预烧 / 离线检查：把 ExportDescriptor 导出的**原始 JSON** 灌回来）。
 #
-# 闸门：写设备侧信息必须 confirm=true；persist=true 还要 params.allow_flash_persist=true。
-# 导入后节点会重新 configure（描述符变了，之前解析出的端点表可能失效）。
+# 闸门：必须 confirm=true（会替换端点表并重新 configure）。
+#
+# ⚠ `crc` / `fw_version` 是**必填的语义**（对应 SDK 的 `jsdk_desc_hint_t`）：
+#   `jsdk_context_desc_import_raw()` 要求 hint **非空**（`!hint` ⇒ INVALID_ARG），
+#   因为 CRC/fw 是**设备侧属性**，从 JSON 正文里推不出来。值允许为 0（= 未知/来自缓存），
+#   但**请把 ExportDescriptor 返回的 crc/fw_version 原样带过来**；否则后续 desc-info 会显示
+#   crc=0（看着像“描述符没校验”，其实是信息在导入这一步就被丢掉了）。
+#
+# ⚠ `persist`（写设备 Flash）：**本 SDK 版本没有这个能力** ⇒ 传 true 会被**明确拒绝**
+#   （不做静默忽略，见 DESIGN §13.4）。导入只影响**本进程**的端点表/本地缓存。
 
 string bus
-uint8[] data
-bool persist                       # 是否写入设备 Flash（false = 只写本地缓存）
-bool confirm
+uint8[] data                       # ExportDescriptor.data 原样带回（设备原始 JSON）
+uint16 crc                         # ← ExportDescriptor.crc（0 = 未知/来自缓存）
+uint32 fw_version                  # ← ExportDescriptor.fw_version（0 = 未知）
+bool persist                       # ⚠ 本版本不支持（SDK 无“写设备描述符”能力）⇒ true 被拒
+bool confirm                       # 闸门：会替换端点表 + 重新 configure
 ---
 bool success
 string message
-uint32 crc                         # 实际写入数据的 CRC32（便于对拍产线工具）
+uint16 crc                         # 实际导入的**版本 CRC**（回显输入，便于对拍）
+uint32 data_crc32                  # 导入字节的 CRC32（校验传输有没有坏，与上面的版本 CRC 不是一回事）
 bool device_reconfigured           # 是否已重新 configure 生效

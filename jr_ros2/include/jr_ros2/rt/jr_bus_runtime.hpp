@@ -99,6 +99,20 @@ struct DescInfoPOD {
     bool          from_cache = false;
 };
 
+/**
+ * 导入描述符时**必需**的元信息（对应 SDK 的 `jsdk_desc_hint_t`）。
+ *
+ * ⚠ 为什么必需：SDK 的 `jsdk_context_desc_import_raw()` 把 hint 当成硬前提
+ *   （`!hint` ⇒ `JSDK_ERR_INVALID_ARG`）：CRC / fw 是**设备侧属性**，从 JSON 正文里推不出来。
+ *   值可以是 0（= 未知 / 来自缓存），但**结构本身不能省**。
+ *   v0.14 我们就是传了 `nullptr` ⇒ “导出→导入”**永远失败**，而且我们的错误文案
+ *   把原因猜成了“payload 不是原始 JSON”（§13.4 那条误判的根因，§13.3-38）。
+ */
+struct DescHintPOD {
+    std::uint16_t crc = 0u;         /**< 设备给的描述符 VersionCRC（`ExportDescriptor.crc` 原样带回） */
+    std::uint32_t fw_version = 0u;  /**< 设备固件版本（`ExportDescriptor.fw_version` 原样带回） */
+};
+
 /** 故障边沿事件（RT 侧只入环，非 RT 侧发布）。 */
 struct FaultEvent {
     std::uint64_t t_ns = 0u;
@@ -231,7 +245,17 @@ public:
     const std::vector<std::uint8_t> &descriptor_json() const noexcept { return desc_json_; }
 
     /** 导入描述符原始 JSON（产线预烧）。成功后描述符已换 → 需要重新 configure。 */
-    Status import_descriptor(const void *json, std::size_t len, Result *res) noexcept;
+    /**
+     * 导入**设备原始 JSON** 描述符（不经 CAN；按当前 `cfg.desc` 重新解析 ⇒ 改 filter 无需重下）。
+     * ⚠ `hint` 是 SDK 的**硬前提**（不是可选项），见 `DescHintPOD`。
+     * ⚠ `needs_reconfigure`：描述符被改动（成功导入 ✓）**或**被回滚（失败导入后恢复 ✓）时为 true
+     *   —— 两种情况都要求调用方重新 `configure()` 重新解析（否则端点表是旧的/空的）。
+     *
+     * ⚠⚠ SDK 的 `import_raw()` 会**先清空 store 再解析** ⇒ 失败的导入会摧毁内存里的描述符，
+     *   而且 `configure()` 不会重新下载（SDK 认为它已存在）。本函数内置**回滚**护栏（§13.3-39）。
+     */
+    Status import_descriptor(const void *json, std::size_t len, const DescHintPOD &hint,
+                             Result *res, bool *needs_reconfigure = nullptr) noexcept;
 
     /** 单关节使能状态（服务结果/诊断用）。 */
     bool joint_enabled(unsigned local_index) const noexcept;

@@ -145,7 +145,7 @@ void usage()
         "  status                              总线状态 / 统计（BusStatus）\n"
         "  info [--joint NAME]                 设备身份（fw/hw/serial/classic）\n"
         "  desc-info                           描述符信息（长度/CRC/端点数/是否来自缓存）\n"
-        "  desc-export <file>                  导出描述符原始 JSON 到文件\n"
+        "  desc-export <file>                  导出描述符原始 JSON 到文件（并打印可复制的导入命令）\n"
         "  ep-list [--filter S] [--max N]      枚举端点（filter: 末尾 * = 前缀，. = 段前缀）\n"
         "  ep-lookup <path>                    查单个端点（id/type/读写权限）\n"
         "  read --paths a,b [--joints x,y]     批量读参数\n"
@@ -162,7 +162,10 @@ void usage()
         "  node-id <joint> <new_id> [--persist] --confirm   改 node_id\n"
         "  fault-reset [--joints a,b] [--allow-device-reset] --confirm  清故障\n"
         "  jog --joint NAME --pos R [--kp K] [--kd D] [--tau T] --duration-s S --confirm\n"
-        "  desc-import <file> [--persist] --confirm\n"
+        "  desc-import <file> [--crc N] [--fw N] --confirm\n"
+        "          ⚠ crc/fw 是**设备侧属性**、从 JSON 里推不出来，SDK 要求必须给（可为 0）。\n"
+        "            产线预烧请用 desc-export 打印的那一行（它把两个值都带上了）。\n"
+        "          ⚠ --persist（写设备 Flash）本 SDK 版本**不支持** ⇒ 会被服务明确拒绝。\n"
         "  write --path P --value V [--joint x] [--persist] --confirm\n"
         "\n"
         "通用选项：--node <bus>（必填）、--timeout-ms N（默认 5000）、--verbose\n"
@@ -339,14 +342,23 @@ int cmd_desc_export(rclcpp::Node::SharedPtr node, const Opts &o, const std::stri
             static_cast<std::streamsize>(res->data.size()));
     std::printf("  [ok] 已写出 %zu 字节到 %s（crc=0x%04x fw=0x%08x）\n", res->data.size(), path.c_str(),
                 static_cast<unsigned>(res->crc), res->fw_version);
+    /* 把导入要用的 hint 直接给成**可复制**的一行：产线预烧时最不容易出错。 */
+    std::printf("  → 导入到另一台/另一台机器：jr_ctl --node <bus> desc-import %s --crc 0x%04x --fw 0x%08x --confirm\n",
+                path.c_str(), static_cast<unsigned>(res->crc), res->fw_version);
     return kOk;
 }
 
 int cmd_desc_import(rclcpp::Node::SharedPtr node, const Opts &o, const std::string &path,
-                    bool persist)
+                    unsigned hint_crc, unsigned hint_fw, bool persist)
 {
     if (!o.confirm) {
-        std::fputs("jr_ctl: desc-import 会改设备描述符，必须 --confirm（见 §8.5）\n", stderr);
+        std::fputs("jr_ctl: desc-import 会替换端点表（并重新 configure），必须 --confirm（见 §8.5）\n",
+                   stderr);
+        return kUsage;
+    }
+    if (hint_crc > 0xFFFFu) {
+        std::fprintf(stderr, "jr_ctl: --crc 是 uint16（设备 VersionCRC），实得 %u —— 不截断\n",
+                     hint_crc);
         return kUsage;
     }
     std::ifstream f(path, std::ios::binary);
@@ -359,13 +371,24 @@ int cmd_desc_import(rclcpp::Node::SharedPtr node, const Opts &o, const std::stri
     jr_interfaces::srv::ImportDescriptor::Request req;
     req.bus = o.node;
     req.data = data;
+    req.crc = static_cast<std::uint16_t>(hint_crc);
+    req.fw_version = hint_fw;
     req.persist = persist;
     req.confirm = true;
+    /* ⚠ hint 里的 crc/fw 是**设备侧属性**，从 JSON 正文推不出来（SDK 要求 hint 非空）。
+       两个都是 0 仍然能导入，但**后续 desc-info 会显示 crc=0** —— 别让这件事悄悄发生。 */
+    if (hint_crc == 0u && hint_fw == 0u) {
+        std::fprintf(stderr,
+                     "jr_ctl: ⚠ 没给 --crc/--fw ⇒ 按“未知”导入（crc=0/fw=0）。\n"
+                     "         产线预烧请把 `desc-export` 打印的 crc/fw 原样带过来，\n"
+                     "         否则之后 desc-info 会显示 crc=0（看着像“描述符没校验”）。\n");
+    }
     const auto res = call<jr_interfaces::srv::ImportDescriptor>(node, o.node, "ImportDescriptor", req,
-                                                              o.timeout_ms);
+                                                              o.timeout_ms + 30000);
     if (res == nullptr) return kUnreachable;
     std::printf("%s\n", res->message.c_str());
-    std::printf("  crc=0x%04x device_reconfigured=%d\n", static_cast<unsigned>(res->crc),
+    std::printf("  crc=0x%04x data_crc32=0x%08x device_reconfigured=%d\n",
+                static_cast<unsigned>(res->crc), static_cast<unsigned>(res->data_crc32),
                 res->device_reconfigured ? 1 : 0);
     return res->success ? kOk : kOpFailed;
 }
@@ -718,7 +741,19 @@ int main(int argc, char **argv)
     std::vector<std::string> paths;
     double pos = 0.0, kp = 0.0, kd = 0.0, tau = 0.0, duration_s = 0.0;
     unsigned max_n = 0u, new_id = 0u, rate_ms = 0u;
+    unsigned hint_crc = 0u, hint_fw = 0u;   /* desc-import 的 hint（来自 desc-export 的输出） */
     bool persist = false, resume = false, allow_device_reset = false;
+
+    /* 数字解析：`0x`/`0X` 前缀才按 16 进制（**不能**用 base=0 —— 那样 "010" 会被当八进制）。 */
+    const auto parse_num = [](const char *s, unsigned *out) -> bool {
+        if (s == nullptr || *s == '\0') return false;
+        char *end = nullptr;
+        const int base = (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) ? 16 : 10;
+        const unsigned long v = std::strtoul(s, &end, base);
+        if (end == s || *end != '\0') return false;
+        *out = static_cast<unsigned>(v);
+        return true;
+    };
 
     while (ar.i < argc) {
         std::string a;
@@ -737,6 +772,20 @@ int main(int argc, char **argv)
         else if (a == "--tau") { std::string v; if (!ar.value("--tau", &v)) break; tau = std::strtod(v.c_str(), nullptr); }
         else if (a == "--duration-s") { std::string v; if (!ar.value("--duration-s", &v)) break; duration_s = std::strtod(v.c_str(), nullptr); }
         else if (a == "--confirm") { o.confirm = true; }
+        else if (a == "--crc") {
+            std::string v; if (!ar.value("--crc", &v)) break;
+            if (!parse_num(v.c_str(), &hint_crc)) {
+                std::fprintf(stderr, "jr_ctl: --crc 需要十进制或 0x 前缀的整数（实得 '%s'）\n", v.c_str());
+                return kUsage;
+            }
+        }
+        else if (a == "--fw") {
+            std::string v; if (!ar.value("--fw", &v)) break;
+            if (!parse_num(v.c_str(), &hint_fw)) {
+                std::fprintf(stderr, "jr_ctl: --fw 需要十进制或 0x 前缀的整数（实得 '%s'）\n", v.c_str());
+                return kUsage;
+            }
+        }
         else if (a == "--persist") { persist = true; }
         else if (a == "--resume") { resume = true; }
         else if (a == "--allow-device-reset") { allow_device_reset = true; }
@@ -773,7 +822,7 @@ int main(int argc, char **argv)
     else if (sub == "info") rc = cmd_info(node, o, joint);
     else if (sub == "desc-info") rc = cmd_desc_info(node, o);
     else if (sub == "desc-export") rc = file.empty() ? kUsage : cmd_desc_export(node, o, file);
-    else if (sub == "desc-import") rc = file.empty() ? kUsage : cmd_desc_import(node, o, file, persist);
+    else if (sub == "desc-import") rc = file.empty() ? kUsage : cmd_desc_import(node, o, file, hint_crc, hint_fw, persist);
     else if (sub == "ep-list") rc = cmd_ep_list(node, o, filter, max_n);
     else if (sub == "ep-lookup") rc = file.empty() ? kUsage : cmd_ep_lookup(node, o, file);
     else if (sub == "read") rc = paths.empty() ? kUsage : cmd_read(node, o, joints, paths);
