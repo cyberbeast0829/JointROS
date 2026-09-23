@@ -1,0 +1,8 @@
+# 把当前配置存进设备 Flash（写闸门：需要 params.allow_flash_persist=true 且 confirm=true，§8.5）。
+
+string[] joints                    # 空 = 全部关节
+bool confirm                       # 闸门：必须显式 true
+---
+bool success
+string message
+JointResult[] results

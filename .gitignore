@@ -1,0 +1,23 @@
+# 构建产物（开发构建与 colcon 构建都不是源码）
+build/
+build-*/
+install/
+log/
+.cache/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+.DS_Store
+
+# Python（后续工具/脚本可能的产物）
+__pycache__/
+*.pyc
+*.egg-info/
+
+# 运行期产物（锁与描述符缓存）
+*.lock
+*.owner
+*.desc

@@ -1,0 +1,13 @@
+# 使能 / 失能（批量优先）。
+#
+# enable=false 走 SDK 的**安全失能序列**，且**幂等**（重复调用安全）。
+# 服务内部若总线正在跑控制循环，会先走"安全暂停"（ADR-7：先失能再交出所有权）。
+
+string[] joints                    # 关节名列表；**空 = 本总线全部关节**
+bool enable
+bool resume                        # 操作完成后是否恢复到使能前状态（默认 false：留在未使能）
+uint32 timeout_ms                  # 0 = 用配置里的默认
+---
+bool success                       # 全部关节都成功才为 true
+string message
+JointResult[] results              # 逐关节（与请求顺序一致）

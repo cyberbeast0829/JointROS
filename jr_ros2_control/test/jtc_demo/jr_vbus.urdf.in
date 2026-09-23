@@ -1,0 +1,65 @@
+<?xml version="1.0"?>
+<!-- ==========================================================================
+     JTC 端到端 demo 的机器人模型（最小两关节）
+     --------------------------------------------------------------------------
+     ⚠ `@JR_CONFIG@` 由 run.sh 替换成 jr_vbus.yaml 的**绝对路径**
+        （ros2_control 只把字符串透传给我们，不做路径解析）。
+
+     ⚠ 下面 `<joint>` 里的命令接口块是**占位行**，由 run.sh 按模式替换成命令接口声明。
+        **必须与组件实际导出的接口逐一对上**——controller_manager 会拿 URDF 声明跟硬件导出的集合对账，
+        对不上直接拒绝初始化硬件：
+          "Discrepancy between robot description file (urdf) and actually exported HW interfaces"
+        （实测：CSP 关节只导出 position，而 URDF 声明了 velocity/effort 时就报这个，
+         随后 CM 还会在 pal_statistics 里段错误。所以不准写死。）
+        ⚠ 也别在这段注释里写出占位符本身（会被一起替换掉，实测真踩过）。
+
+     关节名 `j0`/`j1` 必须与 YAML 里的 `name` 一致 —— 不一致时组件在 `on_init`
+     阶段就失败，并**列出配置里可用的名字**（这是最常踩的集成错误）。
+     ========================================================================== -->
+<robot name="jr_vbus">
+  <link name="base_link"/>
+  <link name="l0"/>
+  <link name="l1"/>
+
+  <joint name="j0" type="revolute">
+    <parent link="base_link"/>
+    <child link="l0"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.0" upper="1.0" effort="50" velocity="10"/>
+  </joint>
+
+  <joint name="j1" type="revolute">
+    <parent link="l0"/>
+    <child link="l1"/>
+    <origin xyz="0 0 0.2" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.0" upper="1.0" effort="50" velocity="10"/>
+  </joint>
+
+  <ros2_control name="jr_vbus" type="system">
+    <hardware>
+      <plugin>jr_ros2_control/JrSystemInterface</plugin>
+      <param name="config_file">@JR_CONFIG@</param>
+      <!-- 默认值（写出来是为了让客户看到能配什么）：
+           tick_source=internal → CAN 以 YAML 的 1 kHz 跑，CM 只管 100 Hz；
+           gain_mode=wire → 增益走线上口径（kp/kd）；si 口径见组件头文件说明。 -->
+      <param name="tick_source">internal</param>
+      <param name="gain_mode">wire</param>
+    </hardware>
+
+    <joint name="j0">
+@CMD_BLOCK@
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+
+    <joint name="j1">
+@CMD_BLOCK@
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
+    </joint>
+  </ros2_control>
+</robot>

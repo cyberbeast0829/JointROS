@@ -1,0 +1,17 @@
+# 限时点动（产线/调试翻转头）。**限时 + 需确认**，对标 CLI 的 `--yes --hold`。
+#
+# 结束时一定会走"hold → 等 2 周期 → 失能 → 等 IDLE"，不会留下抱力关节。
+# `duration_s` 硬上限 10 s（节点侧强制，超了直接拒绝）。
+
+string joint                       # 单个关节（点动不做批量：批量点动很容易出事故）
+float64 position                   # rad（输出端）
+float64 kp                         # WIRE 语义的 MIT 增益（0 = 用配置里的默认）
+float64 kd
+float64 torque                     # N·m 前馈
+float64 duration_s                 # 执行时长（>10 直接拒绝）
+bool confirm                       # 闸门：必须显式 true
+---
+bool success
+string message
+float64 actual_duration_s          # 实际执行时长
+string exit_reason                 # 退出原因（到时 / 被拒 / 故障 / 超时）

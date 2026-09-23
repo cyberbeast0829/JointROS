@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>jr_interfaces</name>
+  <version>0.1.0</version>
+  <description>
+    CyberBeast joint module ROS 2 message/service definitions (JointROS).
+    Deliberately self-contained: a customer-written controller only needs this package
+    (no ros2_control, no driver library) to talk to the jr_bus driver node.
+  </description>
+  <maintainer email="dev@example.com">CyberBeast</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+
+  <!-- 只依赖最基础的消息包（ADR-1：客户可以只装它） -->
+  <depend>std_msgs</depend>
+  <depend>builtin_interfaces</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <!-- ⚠ 两个"位置"上的坑（都被 ament_xmllint 抓到过）：
+       ① 组名必须是 `rosidl_interface_packages`（写成 rosidl_default_generators 会被
+          rosidl_generate_interfaces 直接拒绝）；
+       ② **顺序**：schema 里 member_of_group 排在 test_depend **之后**、export 之前 ——
+          写在 test_depend 前面会报
+          "Element 'test_depend': This element is not expected. Expected is one of ( member_of_group, export )"。 -->
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

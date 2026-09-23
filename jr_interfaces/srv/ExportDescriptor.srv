@@ -1,0 +1,11 @@
+# 导出描述符原始字节（路线 B：导出的就是缓存里那份**原始 JSON**）。
+#
+# 产线预烧 / 离线检查用：把导出的字节用 ImportDescriptor 灌到另一台设备/另一台机器。
+
+string bus
+---
+bool success
+string message
+uint8[] data                       # 原始 JSON 字节
+uint32 crc                         # 设备给的 VersionCRC（0 = 未知/来自缓存）
+uint32 fw_version

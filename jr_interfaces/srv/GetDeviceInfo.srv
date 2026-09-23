@@ -1,0 +1,8 @@
+# 查设备身份（hw/fw/serial/classic）。
+
+string bus
+string joint                       # 关节名（空 = 第一个关节）
+---
+bool success
+string message
+DeviceInfo info

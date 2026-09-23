@@ -1,0 +1,10 @@
+# 修改设备 node_id（沿用 SDK 的总线**冲突探测**：会产生两个同号设备时直接失败并说明）。
+
+string name                        # 关节名（当前 id 来自配置）
+uint8 new_id                       # 1..254（0 会被设备/SDK 拒绝）
+bool persist                       # 是否落 Flash
+bool confirm                       # 闸门：改通讯配置必须确认（§8.5）
+---
+bool success
+string message
+uint8 advice                       # JointFault 的 ADVICE_*（如改完要重新 configure）

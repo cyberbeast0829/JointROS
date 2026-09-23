@@ -1,0 +1,10 @@
+# 批量读参数（阻塞；仅在 READY/PAUSED 窗口内执行，节点会自动走安全暂停）。
+#
+# 语义：**关节 × 路径 的叉乘**（joint 为主序），逐项返回（含每项所属关节）。
+
+string[] joints                    # 空 = 全部关节
+string[] paths                     # 完整端点路径（SDK 的 filter 语义不适用于读；必须给全路径）
+---
+bool success
+string message
+ParamValue[] items                 # 逐项；顺序 = joints × paths（joint 为主序）

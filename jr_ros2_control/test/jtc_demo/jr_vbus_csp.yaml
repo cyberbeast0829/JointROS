@@ -1,0 +1,56 @@
+# ============================================================================
+#  jr_vbus_csp.yaml —— JTC 端到端 demo 的 **CSP 变体**（本文件由 jr_vbus.yaml 派生）
+# ----------------------------------------------------------------------------
+#  与 jr_vbus.yaml 的差异只有两处，都是为了 CSP 模式：
+#   ① `joints[].mode: csp` —— 使能时进 CSP（线上是 POS_CONTROL 帧）；
+#   ② 去掉 `limits.*.stiffness/damping` —— CSP 帧里**没有增益位置**，组件根本不会导出
+#      增益接口 ⇒ 留给控制器的只有 `position`（控制器必须只 claim 它）。
+#      关节自己的位置环增益在**设备参数**里（例如 axis0.controller.config.*），
+#      需要用参数服务去调，不是由 ros2_control 写。
+#
+#  为什么值得留这个变体：消费/传统工业客户大量使用位置/速度/力矩模式（不需 MIT 力位混合）。
+# ============================================================================
+# ============================================================================
+#  jr_vbus.yaml —— JTC 端到端 demo 用的 JointROS 配置（虚拟总线，2 关节）
+# ----------------------------------------------------------------------------
+#  ⚠ 这个文件与 WP2 节点/WP4 工具用的是**同一份 schema**（DESIGN §6.4）：
+#     URDF 里只给一个 <param name="config_file">，其余全在这里。
+#
+#  `limits.<joint>.stiffness/damping` 在这里有**第二层含义**：当控制器不写
+#  kp/kd（JointTrajectoryController 就是这种）时，组件用它们作为**默认 MIT 增益**
+#  （wire 模式按 kp = K·2π/gear_ratio 换算，并按设备 mit_max_kp/kd 夹紧）。
+#  没有这两项 → MIT 帧里 kp=kd=0 → 关节是自由状态，表现为"命令下去了关节不动"。
+# ============================================================================
+jr:
+  rt:
+    enabled: false          # 容器里不做实时设置（不谎称实时；生产在 PREEMPT_RT 上开）
+  tick_groups:
+    - name: g0
+      rate_hz: 1000         # CAN 周期：与 controller_manager 的 100 Hz **解耦**
+      buses: [vbus]
+  buses:
+    - name: vbus
+      type: virtual         # SDK 内置设备模型（会按 PD 迭代真的动起来）
+      spec: "0:id=1,gear=16.5,pmax=12.5,vmax=65,tmax=50,hb=5,fd;1:id=2,gear=16.5,pmax=12.5,vmax=65,tmax=50,hb=5,fd"
+      is_fd: true
+      master_id: 1
+      joints: [j0, j1]
+  joints:
+    - {name: j0, bus: vbus, node_id: 1, mode: csp}
+    - {name: j1, bus: vbus, node_id: 2, mode: csp}
+  limits:
+    j0: {position: [-1.0, 1.0]}
+    j1: {position: [-1.0, 1.0]}
+  feedback:
+    source: broadcast_plus_heartbeat
+    heartbeat_ms: 5
+  command:
+    timeout_ms: 100         # 100 ms 没新命令 → 按上面 stiffness/damping 锁位（安全默认）
+  safety:
+    auto_enable: false      # 冷启动不使能；on_activate 才使能
+    require_calibrated: true
+    on_exit_action: disable
+  descriptor:
+    cache_enabled: false    # demo 不写用户缓存目录
+  bus_lock:
+    enabled: false          # demo 用临时工作区，避免残留锁文件干扰

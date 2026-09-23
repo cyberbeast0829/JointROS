@@ -1,0 +1,9 @@
+# 查单个端点。**未命中即 found=false**，不做模糊匹配、不猜（与 SDK 一致）。
+
+string bus
+string path
+---
+bool success                       # 调用本身是否成功（与 found 区分：found=false 也算调用成功）
+string message
+bool found
+EndpointInfo endpoint

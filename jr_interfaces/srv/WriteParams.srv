@@ -1,0 +1,18 @@
+# 批量写参数（阻塞；写后**读回校验**）。
+#
+# 闸门（§8.5）：`confirm` 必须 true；`persist` 还必须 params.allow_flash_persist=true。
+#
+# ⚠ 关于 `success` 的口径（避免"说得比知道的多"）：
+#   `success = 全部项 status == STATUS_OK`。
+#   对 `consumed_by_firmware = true` 的端点（如 axis0.requested_state），
+#   它写进去就被固件收走 → `verified` 必然 false，此时 status 仍是 OK（**不算失败**）。
+#   因此**不能**用 success 推断"值已被验证" —— 要判这个请看返回里的 `all_verified`。
+
+ParamWrite[] writes
+bool persist                       # 写成功后追加 CONFIG_SAVE（落 Flash）
+bool confirm                       # 写闸门：必须显式 true
+---
+bool success
+string message
+ParamWriteResult[] results         # 与请求逐项一一对应
+bool all_verified                  # 所有项都读回一致（consumed_by_firmware 的项会使它为 false）

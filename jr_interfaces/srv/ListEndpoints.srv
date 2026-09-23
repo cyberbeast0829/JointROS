@@ -1,0 +1,13 @@
+# 枚举端点（描述符里的端点表）。
+#
+# filter 语义（与 SDK / jsdk-cli 的 `ep-list --filter` 一致）：
+#   ""（空）→ 全部；以 `*` 结尾 → 前缀匹配；以 `.` 结尾 → 段前缀；否则 → 子串匹配。
+
+string bus                         # 总线名（当前节点只服务一条总线；跨总线请调对应节点）
+string filter
+uint32 max                         # 0 = 用节点默认上限
+---
+bool success
+string message
+EndpointInfo[] endpoints
+bool truncated                     # 达到 max 被截断（**显式**告知，不静默丢）

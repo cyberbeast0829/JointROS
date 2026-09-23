@@ -1,0 +1,7 @@
+# 取描述符状态/来源（缓存命中？完整？端点数？）。
+
+string bus
+---
+bool success
+string message
+DescriptorInfo info

@@ -1,0 +1,10 @@
+# 把当前位置置为零点（**不落 Flash**）。
+#
+# 要持久化请随后调用 SaveConfig（需要 `allow_flash_persist=true` 且 confirm=true）。
+
+string[] joints
+---
+bool success
+string message
+JointResult[] results
+bool persisted                     # 恒 false：本服务明确不写 Flash（写出来是为了让客户看见）

@@ -1,0 +1,7 @@
+# 取总线统计（与 bus_status 话题同构，便于按需拉取而不是订阅）。
+
+string bus
+---
+bool success
+string message
+BusStatus status

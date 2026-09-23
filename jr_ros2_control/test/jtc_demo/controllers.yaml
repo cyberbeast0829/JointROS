@@ -1,0 +1,33 @@
+# ============================================================================
+#  控制器参数（ros2_control 标准写法：controller_manager 段 + 每个控制器一段）
+# ----------------------------------------------------------------------------
+#  ⚠ `robot_description` 与 `update_rate` 由 run.sh 生成后拼在**前面**
+#     （URDF 是长字符串，手写进 YAML 不现实）。
+#
+#  update_rate=100：控制器链 100 Hz。CAN 仍然是 YAML 里的 1 kHz ——
+#  这正是 `tick_source=internal` 的价值（ADR-6）：两个周期**解耦**，
+#  CM 只做信箱交换，不会把 100 Hz 的控制器抖动带到 CAN 上。
+# ============================================================================
+joint_state_broadcaster:
+  ros__parameters:
+    # 默认发布所有导出的状态接口；写出来是为了让客户看到可配。
+    joints: [j0, j1]
+    interfaces: [position, velocity, effort]
+
+joint_trajectory_controller:
+  ros__parameters:
+    joints: [j0, j1]
+    # ⚠ 只 claim position/velocity：JTC **不会**写 kp/kd，
+    #    所以 MIT 增益由组件用 YAML 里的 limits.*.stiffness/damping 兜底
+    #    （见 jr_vbus.yaml 顶部说明）。要自己接管增益就用别的控制器写 kp/kd。
+    command_interfaces: [position, velocity]
+    state_interfaces: [position, velocity]
+
+    allow_partial_joints_goal: true
+    open_loop_control: false          # 用反馈闭环算轨迹误差（否则约束检查无意义）
+
+    constraints:
+      stopped_velocity_tolerance: 0.10
+      goal_time: 1.0
+      j0: {trajectory: 0.30, goal: 0.15}
+      j1: {trajectory: 0.30, goal: 0.15}

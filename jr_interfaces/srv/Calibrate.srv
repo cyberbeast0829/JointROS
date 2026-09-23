@@ -1,0 +1,11 @@
+# 标定（**阻塞**，设备侧可能跑很久；ADR-7 安全暂停窗口内执行）。
+#
+# 成功判据不是"命令发出去了"，而是**读回 `pre_calibrated == true`**（`verified` 数组）。
+
+string[] joints                    # 空 = 本总线全部关节
+uint32 timeout_ms                  # 0 = SDK 默认（120 s）；标定最坏等待很长，别给小值
+---
+bool success
+string message
+JointResult[] results
+bool[] verified                    # 逐关节：是否**读回**确认已标定（与 results 顺序一致）

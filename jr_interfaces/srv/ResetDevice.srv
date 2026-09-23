@@ -1,0 +1,12 @@
+# 设备软复位（**之后必须重新握手/configure**，节点内部会处理）。
+#
+# 这是"estop 锁存清不掉"时的最后手段（真机实测：CLEAR_ERRORS 无效，只有 reset/断电可清）。
+# 复位可能让设备回到旧的 node_id（若刚改过 id 还没落盘）→ 看 advice。
+
+string[] joints                    # 空 = 全部关节
+bool confirm                       # 闸门：必须显式 true
+---
+bool success
+string message
+JointResult[] results
+uint8 advice                       # JointFault 的 ADVICE_*

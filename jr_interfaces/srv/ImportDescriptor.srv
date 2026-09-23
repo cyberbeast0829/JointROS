@@ -1,0 +1,14 @@
+# 导入描述符（产线预烧：把导出的字节灌进设备/本地缓存）。
+#
+# 闸门：写设备侧信息必须 confirm=true；persist=true 还要 params.allow_flash_persist=true。
+# 导入后节点会重新 configure（描述符变了，之前解析出的端点表可能失效）。
+
+string bus
+uint8[] data
+bool persist                       # 是否写入设备 Flash（false = 只写本地缓存）
+bool confirm
+---
+bool success
+string message
+uint32 crc                         # 实际写入数据的 CRC32（便于对拍产线工具）
+bool device_reconfigured           # 是否已重新 configure 生效

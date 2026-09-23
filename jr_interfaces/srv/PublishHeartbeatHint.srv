@@ -1,0 +1,17 @@
+# 心跳建议（ADR-5/§8.5）：**不自动执行**，只回建议值与影响评估。
+#
+# 为什么只给建议：改设备心跳会改变总线帧率与占用，进而影响其它节点的预算 ——
+# 这个决定必须由客户的规划来做，不能由驱动"顺手改了"。
+
+string bus
+uint32 rate_ms                     # 期望的心跳周期（0 = 只查询当前值）
+bool persist                       # 是否建议落 Flash（仅用于生成建议文本）
+---
+bool success
+string message
+uint32 current_rate_ms             # 设备**当前**的心跳周期（读回值）
+uint32 suggested_rate_ms           # 建议值
+uint32 extra_frames_per_s          # 相对当前配置预计增加的心跳帧/秒
+float32 bus_load_delta             # 预计总线占用增量（0..1+，**估算值**）
+string impact                      # 影响评估（人话）
+bool device_changed                # 恒 false：本服务不修改设备（写出来让客户放心）

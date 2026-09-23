@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>jr_ros2_control</name>
+  <version>0.1.0</version>
+  <description>
+    ros2_control SystemInterface for CyberBeast joint modules (CYBERBEAST protocol over CAN/CAN-FD).
+    Exports position/velocity/effort plus the MIT gains (kp/kd as wire values, or
+    stiffness/damping in SI units) and supports two tick sources: an internal realtime loop
+    (default, decouples CAN rate from the controller_manager rate) or the
+    controller_manager update thread (simplest, single time base).
+  </description>
+  <maintainer email="dev@example.com">CyberBeast</maintainer>
+  <license>Proprietary</license>
+
+  <!-- P0 最优先交付项（DESIGN ADR-6 / §11 WP3）。RT 与协议全部走 jr_core + JointSDK，
+       本包只做 ros2_control 的接口适配与安全落点。 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>hardware_interface</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_lifecycle</depend>
+  <depend>jr_ros2</depend>
+  <depend>yaml-cpp</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

@@ -1,0 +1,13 @@
+# 故障复位（**不动电机**的 CLEAR_ERRORS 路径）。
+#
+# 实测结论（固件 1545）：estop 锁存清不掉（写 `axis0.error 0` 读回 0，~120 ms 后又变回），
+# 此时 `advice = ADVICE_NEEDS_DEVICE_RESET`，需要 ResetDevice 或断电重启。
+
+string[] joints                    # 空 = 全部关节
+bool allow_device_reset            # true = 明确允许在 CLEAR_ERRORS 无效后尝试软复位
+bool confirm
+---
+bool success
+string message
+JointResult[] results
+uint8 advice                       # JointFault 的 ADVICE_*

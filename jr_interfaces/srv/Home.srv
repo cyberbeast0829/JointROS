@@ -1,0 +1,9 @@
+# 回零（阻塞；语义与 Calibrate 相同：读回确认才算成功）。
+
+string[] joints                    # 空 = 本总线全部关节
+uint32 timeout_ms                  # 0 = SDK 默认
+---
+bool success
+string message
+JointResult[] results
+bool[] verified

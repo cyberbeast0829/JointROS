@@ -1,0 +1,18 @@
+<?xml version="1.0"?>
+<!--
+  pluginlib 描述：`hardware_interface` 是基类所属的"库分类"。
+  ⚠ `name` 必须与客户的 URDF 里 <plugin> 写的一致：
+        <plugin>jr_ros2_control/JrSystemInterface</plugin>
+-->
+<library path="jr_ros2_control">
+  <class name="jr_ros2_control/JrSystemInterface"
+         type="jr_ros2_control::JrSystemInterface"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>
+      CyberBeast joint modules over CAN/CAN-FD (CYBERBEAST protocol via JointSDK).
+      Requires &lt;param name="config_file"&gt; (the same YAML schema as the jr_bus node).
+      Optional: tick_source = internal | controller_manager (default internal),
+      gain_mode = wire | si (default wire).
+    </description>
+  </class>
+</library>
