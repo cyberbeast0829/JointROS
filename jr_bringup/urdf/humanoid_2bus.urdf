@@ -1,0 +1,51 @@
+<?xml version="1.0"?>
+<!--
+  人形双总线示例的 URDF（**示例**，不是工厂几何）。
+
+  ⚠ 它存在的理由：让 `humanoid_2bus.launch.py` 起一个 robot_state_publisher，
+    这样 rviz2 里能直接看到 4 个关节的 TF。真机上：
+      - 关节名必须与配置（以及 `jr_gen_config` 生成的配置）里的 `name` 一致；
+      - 位置/速度/力矩限位应当用 `jr_hw_verify` 读回的**设备值**（不要手抄，见 docs/URDF.zh-CN.md）。
+
+  ⚠ URDF 里的 `<limit>` 只是给 rviz2/MoveIt 用的形状信息；真正的限幅在设备与
+    `limits:` 配置里（SDK 侧生效）—— 两边不一致时以配置/设备为准。
+-->
+<robot name="jr_humanoid_2bus">
+  <link name="base_link"/>
+
+  <!-- 左腿（总线 leg_left） -->
+  <joint name="FL_hip_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="FL_hip"/>
+    <origin xyz="0.0 0.10 -0.10" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="1.5" effort="50" velocity="65"/>
+  </joint>
+  <link name="FL_hip"/>
+  <joint name="FL_knee_joint" type="revolute">
+    <parent link="FL_hip"/>
+    <child link="FL_knee"/>
+    <origin xyz="0.0 0.0 -0.20" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="0.0" effort="50" velocity="65"/>
+  </joint>
+  <link name="FL_knee"/>
+
+  <!-- 右腿（总线 leg_right） -->
+  <joint name="FR_hip_joint" type="revolute">
+    <parent link="base_link"/>
+    <child link="FR_hip"/>
+    <origin xyz="0.0 -0.10 -0.10" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.5" upper="1.5" effort="50" velocity="65"/>
+  </joint>
+  <link name="FR_hip"/>
+  <joint name="FR_knee_joint" type="revolute">
+    <parent link="FR_hip"/>
+    <child link="FR_knee"/>
+    <origin xyz="0.0 0.0 -0.20" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0" upper="0.0" effort="50" velocity="65"/>
+  </joint>
+  <link name="FR_knee"/>
+</robot>

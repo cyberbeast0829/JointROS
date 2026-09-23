@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>jr_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    JointROS 示例与启动文件（WP7）：虚拟总线 demo（无需硬件即可跑通 configure/activate）、
+    单关节示例、人形双总线示例、URDF 片段说明。
+    ⚠ 示例只做“把节点正确地起起来并走完 lifecycle”，不改任何控制逻辑。
+  </description>
+  <maintainer email="dev@example.com">CyberBeast</maintainer>
+  <license>Proprietary</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 驱动与接口（示例本身不含 C++ 代码） -->
+  <exec_depend>jr_interfaces</exec_depend>
+  <exec_depend>jr_ros2</exec_depend>
+
+  <!-- launch 基建（三个发行版通用：不用发行版私有 API） -->
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>lifecycle_msgs</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <!-- ⚠ launch 文件里 `import yaml` 读配置里的总线名 ⇒ 这是**运行期**依赖，不是 test_depend。
+       （写错位置的后果：`rosdep install` 少了它，launch 一启动就 ImportError。） -->
+  <exec_depend>python3-yaml</exec_depend>
+
+  <!-- ⚠ 刻意**不**声明 xacro：示例 URDF 是纯 `.urdf`，不需要它。
+       声明未使用的依赖 = 让客户多装一个包，也是清单在说谎。 -->
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

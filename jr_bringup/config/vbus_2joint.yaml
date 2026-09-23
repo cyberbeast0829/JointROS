@@ -1,0 +1,17 @@
+# 虚拟总线示例：**2 关节**（默认，不需要任何硬件）。
+#
+#   ros2 launch jr_bringup vbus_demo.launch.py            # 2 关节
+#
+# ⚠ 虚拟后端的 spec 语法：分号 `;` 分隔多台设备；每段开头的 `N:` 是**数组下标**，
+#   `id=` 才是 node_id（写反了会发现“配置里声明 node_id=2，总线上没有应答”）。
+jr:
+  tick_groups:
+    - {name: g0, rate_hz: 1000, buses: [vbusrp], cpu: -1, priority: -1}
+  buses:
+    - name: vbusrp
+      type: virtual
+      spec: "0:id=1,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100;1:id=2,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100"
+      is_fd: true
+  joints:
+    - {name: j1, bus: vbusrp, node_id: 1}
+    - {name: j2, bus: vbusrp, node_id: 2}

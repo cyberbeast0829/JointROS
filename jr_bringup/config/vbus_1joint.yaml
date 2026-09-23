@@ -1,0 +1,19 @@
+# 虚拟总线示例：**1 关节**（不需要任何硬件）。
+#
+#   ros2 launch jr_bringup vbus_demo.launch.py joints:=1
+#
+# ⚠ 虚拟后端的 spec 语法（DESIGN §6.4 / §13.2d）：
+#   - 分号 `;` 分隔多台设备；
+#   - 每段开头的 `N:` 是**数组下标**（不是 node_id！），`id=` 才是 node_id；
+#   - `gear/pos/vel/trq` 是设备侧读回的机械参数，`hb`=心跳周期(ms)、`timeout`=设备侧
+#     断帧保护(ms) —— 这些正是 jr_hw_verify / jr_gen_config 在真机上会去读的东西。
+jr:
+  tick_groups:
+    - {name: g0, rate_hz: 1000, buses: [vbusrp], cpu: -1, priority: -1}
+  buses:
+    - name: vbusrp
+      type: virtual
+      spec: "0:id=1,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100"
+      is_fd: true
+  joints:
+    - {name: j1, bus: vbusrp, node_id: 1}

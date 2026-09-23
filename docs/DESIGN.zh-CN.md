@@ -915,7 +915,7 @@ CI：三发行版容器矩阵；每发行版跑 `colcon build` + 单元/集成�
 | **WP4** 工具 | `jr_ctl`（对标 `jsdk-cli` 子命令但走服务）、`jr_gen_config`、`jr_bus_plan`、`jr_hw_verify`、`jr_latency_bench` | 工具自身有测试；**能跑虚拟总线（因此可进 CI）**；`jr_gen_config` 生成的 YAML 能被节点直接加载。 **已落地（v0.12）：`jr_hw_verify` + `jr_gen_config`**；**（v0.14）：`jr_bus_plan` + `jr_ctl`**（前者同属非 ROS 薄 CLI，后者走 19 个服务跑在**真节点**上）。三条验收口径的**逐条证据**：① 工具测试 = ctest `tools_virtual` + `jr_ctl_services`；② 虚拟总线 = 后端由配置 `type: virtual` 决定（**不是** `--if` 开关，见 §13.4），`tools_virtual` 与 `jr_ctl_services` 跑的都是虚拟总线，三发行版绿；③ 生成配置→**节点** = `jr_ctl_services` 第 ⑦ 段（生成 → 起 `jr_bus` → configure+activate → 关节 `j3` 被识别）。`jr_latency_bench` **仍未实现**：P1，要有真机才有意义（不做虚假的“闭环性能已验”） |
 | **WP5** 运维修补 | 描述符导出/导入、参数批量、故障建议码、心跳/看门狗建议值 | 服务契约测试全绿 |
 | **WP6** 文档 | `INTEGRATION` / `SAFETY` / `TROUBLESHOOT` / `PERF` / README（含"不要与 jsdk-cli 同跑"首屏警告） | 文档里的**每条命令都在真机/虚拟总线上跑过**（沿用 SDK 的硬规矩） |
-| **WP7** 示例 | 虚拟总线 demo、单关节 demo、人形 2 总线示例、（可选）MoveIt 示例、URDF 片段生成说明 | `ros2 launch` 一条命令可复现；示例有 CI 冒烟 |
+| **WP7** 示例 | 虚拟总线 demo、单关节 demo、人形 2 总线示例、（可选）MoveIt 示例、URDF 片段生成说明 | `ros2 launch` 一条命令可复现；示例有 CI 冒烟。 **已落地（v0.16）**：新包 `jr_bringup`（launch/config/urdf/docs）+ ctest `launch_smoke`。逐条证据：① *一条命令可复现* = `ros2 launch jr_bringup vbus_demo.launch.py`（2 关节）/ `joints:=1` / `jog:=true` / `humanoid_2bus.launch.py`，都是**真跑**（见 `launch_smoke` 的 4 段）；② *CI 冒烟* = `launch_smoke` 在 colcon 阶段跑，断言"节点真的走到 active + 服务/话题真的建起来 + `jr_ctl` 真的调得通"。**未做**（如实登记）：MoveIt 示例、JTC demo 的 launch 包装（`jr_ros2_control/test/jtc_demo/run.sh` 已是端到端入口，含 launch 文件；再包一层 `ros2 launch` 留待 WP8 之后） |
 | **WP8** 测试与性能 | L1~L6 + §7.5 阈值 | 性能报告出数字；未达标项**必须**记录在案并给出后续动作（不允许"看起来还行"） |
 | **WP9** 交付与发布 | 版本策略（与 SDK 版本绑定表）、私有 apt/tarball 交付说明、`rosdep` 私有源说明 | 在一个干净容器里按文档从零装到跑通（**真跑一遍**） |
 
@@ -1128,6 +1128,35 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 > ⚠ 这个用例**必须真起节点**：`jr_bus` 是**生命周期节点且没有 autostart** —— `ros2 run` 之后
 > 进程“活着”但不建任何服务（服务在 `on_activate` 里才创建），客户端只会看到 `服务不可达`。
 > 这是 v0.14 花掉最多时间的一个“看起来像工具坏了”的坑（§13.3-36）。
+
+#### 13.2f WP7 示例（`jr_bringup`，v0.16）
+
+验收口径两句：**「`ros2 launch` 一条命令可复现」** + **「示例有 CI 冒烟」**。逐条对证据：
+
+**① CI 冒烟真的在跑（三发行版）**：`colcon test` 里 `jr_bringup` 的**测试阶段耗时**
+（`Starting/Finished <<< jr_bringup`）在三个发行版分别是 **31.3 s / 29.8 s / 36.0 s**，
+而同包**构建**阶段只有 0.25–0.41 s —— 这 30 多秒就是 `launch_smoke` 在真起 launch。
+`colcon test` 汇总：**22 tests / 0 errors / 0 failures / 0 skipped**（比 v0.15 多 1 个 = `launch_smoke`）；
+`ctest`（无 ROS 路径）仍 **12/12**，JTC 端到端 mit + csp 仍 PASS，三发行版 `run.sh` **全 rc=0**。
+
+**② 用例有牙齿（变异测试）** —— “示例有冒烟”这句话必须能被证伪，否则只是又一个绿灯：
+
+| 步骤 | 操作 | 期望 | 实测 |
+|---|---|---|---|
+| ① 基线 | 好文件，`ctest -R launch_smoke` | 绿 | ✓ `Passed 29.3 s`；用例自报 **15 通过 / 0 失败** |
+| ② 变异 | 把 launch 里的匹配器换回**最初那个坏写法**（`getattr(node,'node_name',None)`，§13.3-40） | **必须红** | ✓ `***Failed 375.4 s`；用例自报 **2 通过 / 12 失败**（`wait_active` 4 段各耗满 60 s 预算才是这 375 s 的来源） |
+| ③ 复原 | 好文件打回 | 必须重新绿 | ✓ `Passed 29.3 s`、15 通过 / 0 失败 —— **按测试结果判定**，不看“文件已还原”这种间接证据 |
+
+**③ 用例断言清单（15 项）**：① 一条命令 → `/vbusrp active`；② `jr_ctl status` rc=0（服务真的建起来了）；
+③ `nodes_online=2`；④ `read --joints j1,j2` 两个关节都能寻到；⑤ `/vbusrp/joint_states` 话题存在；
+①b `jog:=true` → active、`exit_reason` 出现且不是 `failed`（实测 `jog finished on 'j1': 500 ms / 454 ticks`）、
+无子进程意外退出；② `joints:=1` → active、`nodes_online=1`、`read` 可调；
+③ 人形双总线 `/leg_left` 与 `/leg_right` 都 active、左侧服务可调、`robot_description` 已发布。
+
+> ⚠ 这份清单里的每一条都写成了**有据可查**的形式：比如“2 个关节”不是去 `status` 输出里找关节名
+> （那是**总线级快照**，根本没有关节名表 —— 第一版就是这么写错的，§13.3-43），
+> 而是 `nodes_online=2` + 逐关节 `read`。同理 `jog:=true` 是**README 里写了的开关**，
+> 写了的就必须真跑（§13.3-43 末）。
 
 ### 13.3 实现期撞到的真问题（已修，记录以免重犯）
 
@@ -1480,6 +1509,74 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 
 > `csp` 模式的行是 v0.11 补的（同一次复原后的复跑里 `run.sh` 已改为默认跑 mit + csp 两种模式）。
 
+40. **`ChangeState` 的匹配器：手写“按名字比”会让 lifecycle 静默停摆（v0.16，WP7 撞到）**：
+    现象：`ros2 launch jr_bringup vbus_demo.launch.py` 起来后，`ros2 launch` 日志**一句错都不报**，
+    `ros2 node list` 有 `/vbusrp`、`/vbusrp/change_state` 服务也在，但
+    `ros2 lifecycle get /vbusrp` **永远是 `unconfigured`** ⇒ 服务表里只有 lifecycle 自带的那些，
+    `jr_ctl` 全部“服务不可达”。看着像“节点坏了”，其实是**我们发给它的 CONFIGURE 事件没发出去**。
+    根因：我给 `ChangeState(lifecycle_node_matcher=…)` 写了个“按节点名匹配”的 lambda，
+    里头用 `getattr(node, 'node_name', None)` —— 而 `launch_ros.actions.Node.node_name` 是**属性**，
+    在动作执行前会 **`raise RuntimeError("cannot access 'node_name' before executing action")`**；
+    `getattr` 只吞 `AttributeError`，异常于是从事件处理链里冒出去（launch 只把它记在
+    `launch_ros.utilities.lifecycle_event_manager` 那一层，**屏幕上看不到**）。
+    ⇒ 三条可复用教训：
+    ① **匹配器用公开 API**：`from launch.events import matches_action` → `matches_action(node)`
+       （同一性比较，三发行版都有；它也是官方 lifecycle 示例的写法）。
+    ② **`getattr(obj, name, default)` 不等于“安全取属性”**：只吞 `AttributeError`。
+       “取个值顺便兜底”这种写法碰上**会抛的 property** 就是埋雷。
+    ③ **“节点活着但什么都不建”是一个专门的症状**（§13.3-36 的另一面）：先查
+       `ros2 lifecycle get` 的状态，再查服务表，**不要**先怀疑节点实现。
+    ⚠ 顺带一条排障脚本的坑：这个用例最初“超时”时**一条线索都没有**，因为 ctest 的
+    输出是**全缓冲**的，被 kill 掉那一刻缓冲区里的 `[ok]/[FAIL]` 全丢。跑这类用例请
+    `stdbuf -oL -eL`（或让脚本自己单位置刷新），否则“没输出”会被误读成“没跑到”。
+
+41. **tick 组才是“节点打开的单位”：一进程一条总线 ⇒ 一条总线一个 tick 组（v0.16，WP7 撞到）**：
+    人形双总线示例（一个 YAML 两条总线、launch 起两个 `jr_bus`、各自 `bus:=` 选一条）第一版把
+    两条总线放进了**同一个** `tick_groups` 条目，结果第二个进程直接死：
+    `[FATAL] leg_right: opening bus 'leg_right' failed: bus_lock: '/var/lock/jr-leg_left.lock' is held by pid …`。
+    根因：`bus` 参数只决定**谁是“自己”（配置/命名/服务作用域）**，而 `TickGroup::open_buses()`
+    开的是**该组里的所有总线** —— 于是两个进程都去抢两条总线，第二只手必然撞单 master 锁。
+    信号在第一个进程的日志里其实写着：`tick_group 'g0': 2 bus(es), 4 joint(s)`（单总线进程应当只有 1）。
+    ⇒ 配置纪律：**一条总线一个 tick 组**（多总线 = 多进程 = 多组）。
+    这也是“**报错要指向真因**”的一例：`bus_lock` 的提示很到位（连“两个 master 会让设备
+    只记住最后一个 master id”都写了），顺着它两分钟就定位了。
+
+42. **冒烟的“等待预算”不能用「轮数 × 间隔」算（v0.16，自查抓出）**：
+    第一版 `wait_active()` 写 `for i in $(seq 1 $((seconds*5))); do timeout 5 ros2 lifecycle get …; sleep 0.2; done`
+    —— 每轮那条 `ros2 lifecycle get` 自己就要 ~1 s，于是传 `60`（秒）实际等 **6 分钟以上**，
+    正是第一次 `ctest` 超时（420 s）的直接原因。改成**墙上时钟**（`SECONDS` + `deadline`）后，
+    参数 `seconds` 才是真上限。⇒ 凡是“等 X 秒”的循环，预算必须来自时钟，不能来自迭代次数
+    （`timeout` 的粒度、命令自身的耗时都会把它放大一个量级）。
+
+43. **冒烟用例的断言必须落在“真的存在”的证据上（v0.16，自查抓出）**：
+    我原本写了 “`status` 输出里应当能看到 `j2`（2 个关节）” —— 但 `jr_ctl status` 打印的是
+    **总线级快照**（`nodes_online` 等），**不含关节名表**，这条断言永远不可能通过
+    （它测的是我的想象，不是程序）。改成两条有据可查的断言：
+    ① `nodes_online=2`（SDK 的心跳在线数；`joints:=1` 那一路则断言 `nodes_online=1`，
+       两条互为对照，能证明“配置真的换了”）；
+    ② `read --joints j1,j2` 两个关节**都能寻到**（逐关节寻址的直接证据）。
+    ⇒ 写断言前先问“这条证据**在哪个输出里**、我刚才亲眼见过吗”。
+    同理：**文档里写了的开关（`jog:=true`）必须真跑一遍**，否则示例只是承诺 —— 冒烟里现在有一段
+    专门跑它，并断言 `exit_reason=` 出现且不是 `failed`、且没有子进程意外退出。
+
+44. **快迭代也有“测了过期产物”的坑（v0.16）**：为了不每次重建（colcon 全量 ~2 min），
+    我写了个脚本把改动**拷进安装空间**再跑。第一次只拷了 `launch/*.py` 忘了 `config/*.yaml`，
+    于是 ③ 用例一直拿着**旧配置**跑（日志里还明晃晃写着 `tick_group 'g0': 2 bus(es)`，
+    而我盯着 launch 文件找了半天）。⇒ 快迭代路径要么**跟着重建**，要么把“拷哪些东西”
+    一并写清（`launch/` + `config/` + `urdf/`），且**看日志里的实际参数值**而不是“我以为拷过了”。
+
+45. **⚠ “在 Windows 开发机上永远看不见”的可执行位坑（v0.16，自查抓出）**：
+    `jr_bringup` 的 `add_test` 第一版写成 `COMMAND "${CMAKE_CURRENT_SOURCE_DIR}/test/test_launch_smoke.sh"`
+    —— 靠 shebang 启动。理由很“自然”：容器里它就是这么跑通的。
+    但本仓库（Windows 宿主 + Git）**索引里所有文件都是 `100644`**
+    （`git ls-files -s docker/run.sh` 也是），而 Windows 的 drvfs/MinGW 挂载**把所有文件都报成可执行**
+    ⇒ 这个写法在本机、在容器里、在 CI 里**全都绿**，只有客户在 Linux 上真克隆一份才会
+    “Permission denied”。既有测试 `test_tools.sh` / `test_jr_ctl.sh` 全都写成 `COMMAND bash …`，
+    本来就是被这件事教出来的 —— 我照着“自己那条能跑的命令”写，反而把既有约定丢了。
+    ⇒ 定法：**一律 `COMMAND bash "<脚本>"`**；判据是 `git ls-files -s` 的权限位。
+    推广：**凡是“宿主平台的特性能兜住这处错误”的写法，都要按最严平台写**（同族：跨
+    wsl→docker→bash 的引号与路径语义、Linux 二进制在 WSL 里被 binfmt 直接跑起来）。
+
 ### 13.3b 自查（代码审阅）发现并修的问题
 
 | # | 问题 | 影响 | 修法 |
@@ -1535,6 +1632,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | v0.6 | 2026-09-22 | **WP3（`ros2_control`，P0 最优先）落地**：新增 `jr_ros2_control`（`SystemInterface`，`tick_source=internal|controller_manager`、`gain_mode=wire|si`、生命周期与安全落点、`compat/` 集中发行版差异）与 `jr_config_yaml`（与节点/工具**共用**的 §6.4 YAML schema，未知键报错）；`jr_core` 增加**外部驱动 tick**（`start_external()`/`step()`，与内部线程模式共用同一条 `run_cycle()`）。**Jazzy 与 Humble 双双实测绿**（组件测试 74 断言；`colcon test` 11 tests / 0 failures）。期间修掉真问题：外部模式**永远无法使能**的守卫自相矛盾（§13.3-15）、`jsdk::can` 别名缺失、ament 导出集顺序导致的 `jr_ros2::jr_core` 找不到、静态库缺 `-fPIC`。§13.2 补 WP3 行，§13.3 增至 16 条。**待办**：`JointTrajectoryController` 端到端示例（WP7 的一部分）尚未跑，列为下一步。 |
 | v0.7 | 2026-09-22 | **主目标发行版 Lyrical 打通 + JTC 端到端（三发行版）**：新增 `docker/run.sh lyrical`（Ubuntu 26.04 / gcc 15.2 / **CMake 4.2.3**）；`jr_ros2_control/test/jtc_demo/`（`robot_state_publisher` + `controller_manager` + JSB/JTC + 虚拟总线，发 1.5 s 轨迹并断言终点误差）在 **Humble / Jazzy / Lyrical 三发行版全部 PASS**（终点误差 0.008 rad，三边数值一致）。期间修掉四个真问题：① 签名判定**不能用 CMake 探测**（`check_cxx_source_compiles` 的迷你工程拿不到传递 include → 三发行版全探测失败，且失败时变量是**空串** → 静默走错分支 → Humble 才爆；改为 `__has_include` + 静态断言，并用变异测试证明守卫「会响」，§13.3-18/19）；② CMake 4 起含 C 源的包必须 `project(x C CXX)`（§13.3-17）；③ 基础镜像与 apt 仓库**错批**导致运行期 `undefined symbol`（构建全绿也照挂）→ 镜像里先 `apt-get upgrade`（§13.3-20）；④ 控制器参数必须 `spawner --param-file` 显式传（Lyrical 不再继承 CM 全局参数，§13.3-21）。§9.1 回填 Lyrical 实测基线，§13.2 增 Lyrical 列与 JTC 证据表（13.2b），风险 U1 关闭、U3 缓解。 |
 | v0.8 | 2026-09-22 | **WP2 第一段落地（`jr_interfaces` + `jr_bus` 节点）**：新增 `jr_interfaces`（**16 msg + 19 srv**，只依赖 `std_msgs`/`builtin_interfaces`）与节点层目标 `jr_node`/可执行 `jr_bus`（一个节点 = 一条总线）：配置加载与校验、`open→configure`、`~/cmd_mit`/`~/estop`/`/jr/estop_all` → 无锁信箱、快照 → `joint_feedback`/`joint_states`/`bus_status`/`rt_stats`/`faults`、退出序列（含 SIGINT 走同一条 lifecycle 路径）。**三发行版实测**：`ctest` 10/10、`colcon test` **17 tests / 0 failures / 0 告警**、JTC 端到端 PASS、节点级测试（真 DDS）PASS。核心库补齐 `RtStats` 的 min/mean（§6.1 承诺的字段不能空着）。期间撞到并修掉：① **核心库真 bug：快照从不填关节名**（节点测试按名字找关节时立刻暴露；货已发给客户就是"话题里全是空字符串"，已加回归断言）；② rosidl 包的 `package.xml` **组名与元素顺序**两个坑（`ament_xmllint`）；③ 节点测试曾用 `tx_frames` 绝对值断言"没发控制帧"（configure 阶段的描述符/参数帧也在里面 → `got 29, expected 0`）→ 改为**增量**口径；④ 容器脚本失败时把 `colcon test` 明细吞掉了（`set -e`），现在先打 `--verbose` 明细再退出；⑤ 两处 WP3 时期遗留的告警（`-Wconversion`、新发行版 `return_type::DEACTIVATE` 的 `-Wswitch`）。§13.2 增 13.2c（节点级证据表），§13.4 补 WP2 偏差。**待办**：服务层（19 个服务 + ADR-7 安全暂停 + §8.5 写闸门）、§6.5 诊断、§10.2 剩余用例（双 master/描述符中断/广播降级）。 |
+| v0.16 | 2026-09-23 | **WP7 落地：新包 `jr_bringup`（示例与启动）**。内容：`vbus_demo.launch.py`（2 关节 / `joints:=1` / `jog:=true`）、`humanoid_2bus.launch.py`（两总线 + `robot_state_publisher` + 示例 URDF）、三份配置（`vbus_1joint` / `vbus_2joint` / `humanoid_2bus`）、`urdf/humanoid_2bus.urdf`、`docs/URDF.zh-CN.md`（谁拥有什么 + 三条硬约束：命令接口集必须匹配 `joints[].mode`、关节名必须与配置逐字一致、Jazzy+ 的 CM 从 `/robot_description` 话题读 URDF）、`README.md`（一条命令用法 + “为什么必须走 lifecycle”），以及 **ctest `launch_smoke`**（真跑 `ros2 launch`，断言节点真的走到 `active`、服务/话题真的建起来、`jr_ctl` 真的调得通；`jog:=true` 那条路也真跑）。**lifecycle 编排用 `TimerAction` + `matches_action` + `OnStateTransition('configuring'→'inactive')`** —— 不靠 `ros2 lifecycle set` 外部命令，因为示例要证明的是“launch 一条命令能复现”。期间撞到并修掉五件事（§13.3-40…44）：① **手写的“按节点名匹配”匹配器让 lifecycle 静默停摆**（`Node.node_name` 在执行前抛 `RuntimeError`，`getattr(..., None)` 吞不掉 ⇒ CONFIGURE 根本没发出去，日志一句错都没有；改用公开的 `matches_action`）；② **`tick_groups` 才是“节点打开的单位”** —— 用人形示例第一版把两条总线放进同一组，第二个进程直接死在 `bus_lock` 上（单总线进程的日志里 `2 bus(es)` 就是信号）；③ 冒烟的**等待预算不能用「轮数 × 间隔」算**（每轮 `ros2 lifecycle get` 自身 ~1 s ⇒ 传 60 s 实际等 6 分钟，这正是第一次 `ctest` 420 s 超时的原因）；④ 冒烟断言要落在**真有的证据**上（`jr_ctl status` 打印总线级快照、不含关节名表；改断言 `nodes_online=N` + `read --joints j1,j2` 两个关节都能寻到，两条互为对照）；⑤ 快迭代脚本**只拷 `launch/` 忘拷 `config/`** ⇒ ③ 用例一直在测过期 YAML。**未做**（如实登记）：MoveIt 示例；`jtc_demo` 的 `ros2 launch` 包装（其 `run.sh` 已是端到端入口）。 |
 | v0.15 | 2026-09-23 | **收掉 WP5 的最后一项（描述符往返），并修掉它顺手暴露的两个真问题；同时更正 v0.14 的一处误判**。真因：`jsdk_context_desc_import_raw()` 的 `hint` 是**必填**（`!hint ⇒ JSDK_ERR_INVALID_ARG`，头文件与源码第一句都写了），而我们传了 `nullptr` ⇒ “导出→导入”永远失败；v0.14 把它归因成“导出格式 ≠ 导入要求”是**错的**（§13.3-38 记了三条可复用的教训：别从症状反推格式、自己的解释性文案不能是猜测、契约里写了但没实现的字段要明确拒绝）。改动：`DescHintPOD{crc,fw}` 进核心库的 `import_descriptor()`；`ImportDescriptor.srv` 增加必填语义的 `crc`/`fw_version` 与响应 `data_crc32`（把“版本 CRC”与“数据 CRC32”分开 —— 此前两者都叫 `crc`）；`ExportDescriptor.srv` 的 `crc` 收窄为 `uint16`（与 SDK 的 `jsdk_desc_hint_t` 同宽）；`persist`（写设备 Flash）**明确拒绝**（SDK 没有这个能力，此前是**静默忽略**）。**第二轮（同日，被新用例暴露出来的）**：导入一个**截断**的 JSON 会把内存里的描述符**整个废掉** —— SDK 的 `store_init()` 在解析**之前**执行，而 `configure()` 不会再下载（探针四段对比：①② 正常（`matched 41`）、③ 表没了、④ 再 configure 也救不回来）⇒ 加**回滚护栏**（失败时用现役 JSON + 它的 crc/fw 原样恢复一次；回滚不成则**如实说明**“描述符已被摧毁且无本地副本 ⇒ 重开总线/重启节点”），并让服务在“描述符被改动过”时都重新 `configure()` 重新解析；顺带把 `WriteParams` 里 `lookup_endpoint()` 失败**静默退回 `kUnsupported`** 的误导（上层报“类型不支持”、真因却丢失）改成**就地报真因**。**实测**：`jr_ctl_services` **68 项检查 / 0 失败**（含三条证伪：截断 JSON 必失败、`--persist` 必被拒、**失败导入之后 `read`/`write` 仍可用**）；三发行版 `bash docker/run.sh <distro>` **全 rc=0**（`ctest` 12/12、`colcon test` 21 tests / 0 failures、JTC 端到端 mit + csp PASS）；本机（无 ROS）**10/10**；§13.3-39 / §13.2e / §13.4 已同步（§13.4 里那条“载荷格式不一致”的旧归因已标注为**误判**） |
 | v0.14 | 2026-09-23 | **WP4 收尾：`jr_bus_plan` + `jr_ctl` 落地**（至此 5 个承诺工具中 4 个已实现；只剩 P1 的 `jr_latency_bench`）。`jr_bus_plan`：非 ROS 薄 CLI，复用核心的 `plan_bus()` 报每条总线的负载/帧率/每拍耗时与是否可行（rc=0 可行 / 1 不可行 / 2 用法），与 `jr_hw_verify`/`jr_gen_config` 共用 `tools_virtual`。`jr_ctl`：对标 `jsdk-cli` 但**只走服务**（因此可以在节点跑着的时候用），19 个子命令覆盖读/写/使能/标定/回零/点动/复位/node-id 等，退出码约定 0 成功 / 1 操作失败 / 2 用法 / **4 服务不可达**。**三发行版实测**：`ctest` **12/12**、`colcon test` **21 tests / 0 failures**、JTC 端到端 mit + csp 仍 PASS。期间撞到并修掉六件事（§13.3-36）：① **多读者三缓冲撕裂读**（大坑，见下）；② 生命周期节点**没有 autostart** —— `ros2 run` 只是“活着”但不建服务，必须先 `configure` 再 `activate`（否则 `jr_ctl` 全部 rc=4）；③ 设计表里写的是**类型名**（`SetEnabled`），节点实际注册的是 **snake_case**（`~/set_enabled`）⇒ `jr_ctl` 要转换，且**排障以 `ros2 service list` 为准**；④ CMake 里必须用 `rclcpp::rclcpp` 而不是裸 `rclcpp`（后者只给了文件名、没给 include 路径）；⑤ 测试里工作区 `setup.bash` 不能从二进制路径推（测试跑在 build 树里，install 是**兄弟目录**）⇒ 由 CMake 从 `CMAKE_INSTALL_PREFIX` 算好后用环境变量传给测试；⑥ 位置参数要**按子命令**解释（`node-id <joint> <new_id>` 的第一个位置参数是关节名，而 `desc-export <file>` 是文件名）—— 混了就是 `joint '' is not on bus`（报错点离病因很远）。另外把 `WriteParams` 的空 `joint` 语义补上（**空 = 总线唯一关节**，多关节必须点名，绝不猜）。**未实现**：`jr_latency_bench`（P1）；`ImportDescriptor` 与 `ExportDescriptor` 载荷格式不一致（已如实登记，§13.4）。**收尾补账（同日）**：① §11 验收口径第③条（“生成的 YAML 能被节点直接加载”）此前只证到**加载器**级别 ⇒ 新增 `jr_ctl_services` 第 ⑦ 段真跑“生成 → 起 `jr_bus` → configure+activate → 认出只存在于生成文件里的关节 `j3`”，并用 `ctest -V` 数出 **60 项检查 / 0 失败**（`ctest` 对通过的用例不打印输出，所以“条数”必须另跑一次 `-V` 拿）；② §11 里“`jr_hw_verify --if virtual`”这个**写法与实现不符**（实现是后端由配置 `type:` 决定）⇒ 改文案（能力本身是达成的，先确认了这一点才改）；③ 自查发现两条“**永远不会红**”的等待循环（`… && break` 循环后看 `$?`，跑满时取到 `sleep` 的 0）⇒ 改成显式标志位，其中一条是**既有**用例里的旧洞 |
 | v0.13 | 2026-09-23 | **清掉 §13.4 的两条小账**：① 非 MIT 关节的配置告警改为**同时**指出两条合法路径（`~/cmd` 与 ros2_control）—— 此前只说 `~/cmd`，会让 ros2_control 客户去翻一个跟他无关的话题；② `command.interpolation=linear` **真正落地**（此前只是“解析了但行为 = none”）。插值实现放在**核心 RT 路径**（`BusRuntime::apply_command()`）：段长 = **实测**的相邻命令间隔（夹在 [0.5 ms, 200 ms]，即“控制器周期”），只插**该模式承载的运动量**（MIT 的 pos/vel/tau、CSP 的 pos、CSV 的 vel、CST 的 tau、CURRENT 的 A），**不插**增益与限制量（增益不是轨迹）；**首条命令**以及 **estop / hold / zero_torque 之后的第一条命令**一律**立即**生效（从 0 慢慢爬上去是安全问题）。`command.interpolation` 从“节点层键”变为 `Config::command` 的字段（节点与 ros2_control 共用），由 `TickGroup::open_buses()` 统一接进每条总线。新增可观测面 `BusRuntime::applied_target()`（本 tick 实际下发的目标；诊断与测试共用）。**实测**（本机 10/10、**523 断言**，+14）：新用例把目标序列逐拍打出来 —— `0.300 → 0.236 → 0.172 → 0.108 → 0.044 → … → -0.200`（等差 = 真的线性），首条命令 0.3000 立即到位，关掉插值后 0.2500 立即到位。期间撞到两件事（§13.3-35）：① `TickGroup::step()` **不吃时间**（连跑 10 拍只几十微秒）⇒ 不 sleep 的采样循环永远看到起点值，看着像“插值没生效”；② 控制帧其实是 **16 字节**（`len=16 id=0x0a000807`），按“MIT 单播 = 8 字节”过滤会抓到参数帧 ⇒ 改为暴露 `applied_target()`，不在测试里反解线格式。 |

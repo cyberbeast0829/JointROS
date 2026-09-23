@@ -73,7 +73,7 @@ if compgen -G "jr_*/package.xml" > /dev/null; then
     #   客户的标准做法是把 jr_* 包放进他们自己的工作区 src/（那里没这个干扰）；
     #   本脚本直接指向包目录，等价且更明确。
     colcon --log-base "$JR_COLCON_LOG_BASE" build \
-        --base-paths jr_interfaces jr_ros2 jr_ros2_control \
+        --base-paths jr_interfaces jr_ros2 jr_ros2_control jr_bringup \
         --build-base "$JR_COLCON_BUILD_BASE" \
         --install-base "$JR_COLCON_INSTALL_BASE" \
         --cmake-args -DCMAKE_BUILD_TYPE=RelWithDebInfo -DJRSDK_SOURCE_DIR="$JR_SDK_RO"
@@ -85,7 +85,7 @@ if compgen -G "jr_*/package.xml" > /dev/null; then
     #   （set -e）→ **失败明细一行都看不到**。现在先记账、把 --verbose 明细打出来再退出。
     set +e
     colcon --log-base "$JR_COLCON_LOG_BASE" test \
-        --base-paths jr_interfaces jr_ros2 jr_ros2_control \
+        --base-paths jr_interfaces jr_ros2 jr_ros2_control jr_bringup \
         --build-base "$JR_COLCON_BUILD_BASE" \
         --install-base "$JR_COLCON_INSTALL_BASE" \
         --return-code-on-test-failure

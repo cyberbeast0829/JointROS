@@ -32,8 +32,8 @@
 |---|---|---|
 | `jr_interfaces` | 消息与服务定义（自研控制器可只依赖它） | **已实现**（WP2）：16 msg + 19 srv |
 | `jr_ros2` | **实时核心库**（目标 `jr_core`，无 rclcpp 依赖）+ 生命周期驱动节点（`jr_bus`）+ 工具（`jr_ctl` / `jr_hw_verify` / `jr_gen_config` / `jr_bus_plan` / `jr_latency_bench`） | **`jr_core` 已实现并测试通过**；**`jr_bus` 节点已完整落地**（话题/19 服务/诊断/`~/cmd`）；**工具已落地 4/5**（`jr_hw_verify` / `jr_gen_config` / `jr_bus_plan` 非 ROS，`jr_ctl` 走服务）；`jr_latency_bench` 待实现（P1，要有真机） |
-| `jr_ros2_control` | `ros2_control`（`hardware_interface`）硬件组件 | **已实现并测试通过**（WP3）：三发行版 `colcon test` 19/0 + JTC 端到端 PASS（mit + csp）；**命令接口按 `joints[].mode` 导出**（CSP/CSV/CST 可用，`CURRENT` 拒绝） |
-| `jr_bringup` | launch / 参数模板 / URDF 示例 / 演示应用 | 待实现（WP7） |
+| `jr_ros2_control` | `ros2_control`（`hardware_interface`）硬件组件 | **已实现并测试通过**（WP3）：三发行版 `colcon test` **22 tests / 0 failures**（工作区总数，含 `jr_bringup` 的 `launch_smoke`） + JTC 端到端 PASS（mit + csp） ；**命令接口按 `joints[].mode` 导出**（CSP/CSV/CST 可用，`CURRENT` 拒绝） |
+| `jr_bringup` | launch / 参数模板 / URDF 示例 / 演示应用 | **已实现（WP7）**：`vbus_demo.launch.py`（虚拟总线 + 自动 configure/activate，可选点动）、`humanoid_2bus.launch.py`（双总线 + 示例 URDF）、`docs/URDF.zh-CN.md`；ctest `launch_smoke` 真跑示例 |
 
 ## 目标环境
 
@@ -139,6 +139,14 @@ controller_manager 周期**解耦**，`read()/write()` 只做信箱交换（常�
 （详见 JointSDK 的 UNITS 文档）。
 
 ## 跑起来：`jr_bus` 是**生命周期节点**（没有 autostart）
+
+**最快的路**（虚拟总线，不需要任何硬件 —— 示例会替你走下面的 configure/activate 两步）：
+
+```bash
+ros2 launch jr_bringup vbus_demo.launch.py      # 2 关节；joints:=1 单关节；jog:=true 还会点动一次
+```
+
+**手动方式**（真机/自己写 launch 时就是这四步）：
 
 ```bash
 ros2 run jr_ros2 jr_bus --ros-args -r __node:=vbusrp -p config_file:=/etc/jr/robot.yaml &

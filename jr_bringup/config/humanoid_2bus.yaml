@@ -1,0 +1,36 @@
+# 人形示例：**两条总线**（左腿 / 右腿各 2 关节，共 4 个虚拟关节）。
+#
+#   ros2 launch jr_bringup humanoid_2bus.launch.py
+#
+# ⚠ 一个节点 = 一条总线（这是 `jr_bus` 的设计约束，不是配置习惯）：
+#   本文件把两条总线的定义放在**同一个 YAML** 里，launch 会起**两个** `jr_bus` 进程，
+#   每个用 `-p bus:=<名字>` 选中自己那条。这样“机器人级配置”只有一份，不会漂移。
+#
+# ⚠ 单 master 纪律：每条 CAN 总线只允许一个主站进程 ⇒ 多总线 = 多进程，
+#   不要试图用一个进程管两条（§8.4 的广播是**总线内**语义）。
+# ❌ 反例（别这么写）：把两条总线塞进**同一个** tick 组：
+#      - {name: g0, rate_hz: 1000, buses: [leg_left, leg_right], ...}
+#    `jr_bus` 打开的单位是 **tick 组**，不是 `bus` 参数选中的那一条 —— 于是两个进程
+#    都去开同一个组里的两条总线，第二个进程直接死在总线锁上（实测）：
+#      [FATAL] leg_right: opening bus 'leg_right' failed: bus_lock:
+#              '/var/lock/jr-leg_left.lock' is held by pid 9313
+#    且第一个进程会“替两条总线”建 tick（日志里 `2 bus(es), 4 joint(s)` 就是信号）。
+#    ⚠ **一进程一条总线 ⇒ 一条总线一个 tick 组**。
+jr:
+  tick_groups:
+    - {name: g_left, rate_hz: 1000, buses: [leg_left], cpu: -1, priority: -1}
+    - {name: g_right, rate_hz: 1000, buses: [leg_right], cpu: -1, priority: -1}
+  buses:
+    - name: leg_left
+      type: virtual
+      spec: "0:id=1,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100;1:id=2,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100"
+      is_fd: true
+    - name: leg_right
+      type: virtual
+      spec: "0:id=1,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100;1:id=2,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100"
+      is_fd: true
+  joints:
+    - {name: FL_hip, bus: leg_left, node_id: 1}
+    - {name: FL_knee, bus: leg_left, node_id: 2}
+    - {name: FR_hip, bus: leg_right, node_id: 1}
+    - {name: FR_knee, bus: leg_right, node_id: 2}

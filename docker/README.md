@@ -47,7 +47,7 @@ bash docker/run.sh jazzy --no-cache
      会让 `find_package(ament_cmake)` 命中，这条路径就名存实亡）；
      它也顺便跑 **WP4 工具**的端到端用例（`tools_virtual`：`jr_hw_verify` + `jr_gen_config`，
      虚拟总线、不需要硬件）；
-   - **[3/4] ament/colcon 路径**：`colcon build --base-paths jr_ros2 jr_ros2_control` + `colcon test`；
+   - **[3/4] ament/colcon 路径**：`colcon build --base-paths jr_interfaces jr_ros2 jr_ros2_control jr_bringup` + `colcon test`；
    - **[4/4] JTC 端到端**：起 `controller_manager` + `JointTrajectoryController` + 虚拟总线，
      发一条真轨迹并断言终点误差；**`mit` 与 `csp` 两种模式都跑**（命令接口集不同 ⇒ demo 的
      URDF 与控制器 claim 都按模式生成，WP3 验收，详见 `jr_ros2_control/test/jtc_demo/`）。
