@@ -1722,6 +1722,11 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
       （避免一刀切）；**变异测试**：把 `torque == 0.0` 改成 `!= 0.0` ⇒ 用例 **FAIL 3**，还原后 **PASS 99**。
     - 教训：**"命令成功"不等于"事情发生"** —— 动作型 API 至少要有一个**能证明它发生**的判据
       （位置变化 / 力矩非零 / 至少拒掉"必然无效"的输入），否则它只是在正确地走流程。
+    - ⚠ **为什么 CI 没拦住它**：ROS 侧的 `jr_ctl_services` 用例里**原来就写着**
+      `jog --joint j1 --pos 0.02 --duration-s 0.2 --confirm`（**不带增益**）并断言 **rc=0** ——
+      即**把这个缺陷写成了"期望行为"**（用例只看了"命令没报错"）。已改成**双向断言**：
+      全零增益必须 `rc=1` 且理由含 `zero-torque`，带增益必须 `rc=0`
+      （改完复跑 `ctest -R jr_ctl_services` → `Passed 94.9 s`；整包 `colcon test` → **23 tests / 0 failures**）。
 
 50. **⚠⚠ 反馈帧与轮询真值不一致时，先问"哪条源"，别先改解码（v0.17，真机；未修，如实登记）**：
     症状：我们发布的 `/joint_feedback` 里 `position`/`velocity` 与设备端点真值对不上

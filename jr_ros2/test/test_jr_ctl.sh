@@ -221,7 +221,17 @@ expect "write 打印了 requested/value/verified" "verified="
 #   `jog`（点动）在这台设备上结束时会锁存 estop，而按 fw 1545 的实测行为，estop 锁存
 #   `CLEAR_ERRORS`(fault-reset) **清不掉**，只能 ResetDevice（`reset` 软复位）或断电。
 #   所以：zero/save/write 这些要"设备无故障且使能"的命令都排在 jog 之前。
-run 0 "jog（0.2 s 点动）" jog --joint j1 --pos 0.02 --duration-s 0.2 --confirm
+#
+# ⚠ F10（真机发现）：**不给增益的点动 = 零力矩 MIT 目标** —— 电机根本不会动，可是
+#   "使能 → 保持 → 失能"整套流程照样跑完并返回成功。这条用例原先写的正是
+#   `jog ... --confirm`（不带 `--kp/--kd`）并断言 rc=0 ⇒ **它把这个缺陷写成了"期望行为"**
+#   （红灯变绿灯的假象：命令成功了，但关节没动）。现在两个方向都要断言：
+#   全零必须**在碰设备之前**被拒；带增益必须真的成功。
+run 1 "jog 全零增益必须被拒（F10：零力矩目标不会动，但流程照样'成功'）" \
+    jog --joint j1 --pos 0.02 --duration-s 0.2 --confirm
+expect "拒绝理由说清是零力矩" "zero-torque"
+run 0 "jog（0.2 s 点动，显式给增益）" \
+    jog --joint j1 --pos 0.02 --kp 2 --kd 0.2 --duration-s 0.2 --confirm
 expect "jog 给出了退出原因" "exit_reason="
 
 # jog 结束后走的是"hold → 等 2 周期 → 失能"，**不留**锁存故障 ⇒ fault-reset 应为 rc=0。
