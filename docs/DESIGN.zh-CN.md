@@ -1178,6 +1178,15 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 > 三段收敛到一段，**再**动代码。§13.3-46…50 五条都是这么定位的。
 > 反面教材也在同一轮里：我从 `health.vbus_V=0` 两次误判"总线没上电"，真值是端点
 > `vbus_voltage=23.09 V`（§13.3-50 记录了同一类"两条源"的坑）。
+>
+> ⚠⚠ **测试机卫生（本轮又踩一次）**：长会话里反复 `kill`/`pkill` 后残留的 `jr_bus` 进程
+> **抱着 `/var/lock/jr-<bus>.lock`**，下一个 `launch` 起来的节点就到不了 `active` ——
+> 症状是 `launch_smoke` 里一片 `[FAIL] xxx 没到 active`，**看起来像 launch/示例坏了**，
+> 实际是环境里躺着一个旧节点。同时 `/dev/shm/fastrtps_port*` 也会积一堆
+> （`open_and_lock_file failed` 的 SHM 报错会出现，但它**在通过的用例里也出现** ⇒ 是噪声，
+> 不是判据）。做法：跑冒烟前先 `pgrep -x jr_bus`（**用 `-x`**，`pkill -f jr_bus` 会打到自己的
+> shell —— §13.3-43 那条坑的同族），必要时清 `/dev/shm/fastrtps_port*`。
+> 判据只能看**测试结果**，不能看"我觉得是环境问题"。
 
 ### 13.3 实现期撞到的真问题（已修，记录以免重犯）
 
