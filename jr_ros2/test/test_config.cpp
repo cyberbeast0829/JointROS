@@ -62,6 +62,19 @@ void test_master_id_zero_rejected()
     JR_CHECK_CONTAINS(r.message, "master_id");
 }
 
+/** `is_fd` 的**默认值**必须是 Classic 起步 —— 这条守的是真机踩出来的一个大坑
+    （DESIGN §13.3-46）：默认 FD + 从不设 `is_fd_explicit` ⇒ 在 Classic 设备上
+    **所有路径**都以 FD 发帧，症状只是“收得到心跳、我的请求没人应”
+    （描述符下载 `0/0 bytes` 卡死，我们的工具因此完全用不了）。 */
+void test_is_fd_default_is_classic()
+{
+    JR_CASE("is_fd 默认必须是 Classic 起步（FD 设备也收经典帧，反之不成立）");
+    const BusCfg b = default_bus_cfg();
+    JR_CHECK_MSG(b.is_fd == false,
+                 "default_bus_cfg().is_fd 又变回 FD 了 —— 配错设备时会退化成"
+                 "“心跳收得到、请求没人应”（真机实测，极难定位）");
+}
+
 void test_duplicate_node_id_rejected()
 {
     JR_CASE("同总线 node_id 重复必须被拒");
@@ -236,6 +249,7 @@ int main()
 {
     test_valid_passes();
     test_master_id_zero_rejected();
+    test_is_fd_default_is_classic();
     test_duplicate_node_id_rejected();
     test_duplicate_joint_name_across_buses_rejected();
     test_bus_not_in_any_group_rejected();

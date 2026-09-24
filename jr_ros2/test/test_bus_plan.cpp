@@ -22,17 +22,19 @@ using namespace jr::rt;
 namespace {
 
 /* ---- 不变量：给用户看的建议必须**完整**到达 ----
-   同一条文本会经 `Result::message`（192 B，前面还要加 "bus 'can0': "）回传；
+   同一条文本会经 `Result::message`（**512 B**，前面还要加 "bus 'can0': "）回传；
    超了就会被 snprintf **静默截断** —— 用户拿到的是一句被砍断的排障建议。
-   把"真实文本 ≤170"钉成断言：以后谁再往文本里加内容，先在这里红。 */
+   把"真实文本 ≤400"钉成断言：以后谁再往文本里加内容，先在这里红。
+   ⚠ 这个界限是从 `Result::message` 的**真实容量**（512，见 jr_status.hpp）推出来的；
+   它曾经写成 170（那时 message 是 192 B）—— 别照抄旧数字，要跟着真实容量算。 */
 void check_text_fits_result(const char *what, const BusPlanResult &r)
 {
     const std::size_t n = std::strlen(r.text);
-    if (n > 170u) {
-        std::printf("  [%s] plan text is %zu chars (>170): Result::message(192) would truncate "
+    if (n > 400u) {
+        std::printf("  [%s] plan text is %zu chars (>400): Result::message(512) would truncate "
                     "it -> '%s'\n", what, n, r.text);
     }
-    JR_CHECK(n <= 170u);
+    JR_CHECK(n <= 400u);
 }
 
 void test_frame_times()

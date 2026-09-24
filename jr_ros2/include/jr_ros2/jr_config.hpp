@@ -253,7 +253,14 @@ struct BusCfg {
     std::uint32_t serial_baud = 0u;       /**< slcan 专用（串口速率，不是 CAN 速率） */
 
     std::uint8_t master_id = 1u;          /**< 1..254；**禁止 0**（设备将完全不回复） */
-    bool         is_fd = true;            /**< 必须与设备侧一致（协议无运行时协商） */
+    /** 对端用的是 CAN FD 吗。⚠ 这是**猜测/起点**，不是断言：协议没有运行时协商。
+        默认 **false（Classic 起步）** —— 与 SDK 的推荐组合一致（`is_fd_explicit = 0`）：
+        FD 控制器**也收**经典帧、反之不成立，所以先按 Classic 发最安全，SDK 会在收到本关节
+        第一帧时自动对齐到对端格式并如实报告（§13.3-46）。
+        ⚠ 以前默认 `true` 且从不设 `is_fd_explicit` ⇒ 在 **Classic** 设备上所有路径都以 FD 发帧，
+        现场症状只是“收得到心跳、我的请求没人应”（描述符下载 `0/0 bytes` 卡死）——
+        真机实测，且我们的工具因此完全用不了（§13.3-46）。 */
+    bool         is_fd = false;
     std::uint32_t nominal_bitrate = 1000000u;
     std::uint32_t data_bitrate = 5000000u; /**< is_fd=false 时忽略 */
 

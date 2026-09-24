@@ -55,6 +55,10 @@ jr:
     - name: virt
       type: virtual
       spec: "0:id=1,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5,timeout=100"
+      # ⚠ 必须**显式**写 is_fd：它现在默认 Classic 起步（§13.3-46），而 Classic 在
+      #    1 kHz + hb=5 ms 下的预算是 60.1% > 60% 上限 ⇒ 会在**开总线**时就被拒，
+      #    那样测到的就不是“缺节点要点头名”这条了（实测踩过）。
+      is_fd: true
   joints:
     - {name: j1, bus: virt, node_id: 1}
 YAML

@@ -293,7 +293,7 @@ int main(int argc, char **argv)
                      br.device[j].fw_version, br.device[j].hw_version,
                      static_cast<unsigned long long>(br.device[j].serial),
                      br.device[j].classic ? "yes" : "no",
-                     (br.device[j].serial == 0u) ? "（serial=0：很可能是老固件）" : "");
+                     (br.device[j].serial == 0u) ? "（serial=0：Classic 下 0x46 只回 hw+fw，协议如此；要序列号请读 `serial_number` 端点）" : "");
             }
             if (ji.gear_ratio <= 0.0 || ji.mit_max_pos <= 0.0 || ji.mit_max_vel <= 0.0 ||
                 ji.mit_max_torque <= 0.0) {

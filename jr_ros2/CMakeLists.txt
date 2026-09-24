@@ -205,6 +205,11 @@ if(JR_BUILD_TESTS)
         test_bus_runtime
         test_ops
         test_desc_cache
+        # `jr_gen_config` 的“命令行 → 扫描用总线配置”映射。**故意不挂在 yaml-cpp 下面**：
+        # 它只用 jr_core 的 `validate_config()`，因此**无 ROS 的 Windows 开发机也能跑** ——
+        # 而它守的两个 bug（slcan 漏 serial_baud / --is-fd 没进总线配置）恰恰是
+        # “只有真机才暴露、CI 的 virtual 路径覆盖不到”的那类（§13.3-47）。
+        test_gen_config_cfg
     )
     if(yaml-cpp_FOUND)
         list(APPEND JR_TESTS test_config_yaml)

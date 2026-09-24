@@ -226,12 +226,22 @@ BusPlanResult plan_bus(const BusPlanInput &in) noexcept
 
     if (!r.feasible) {
         r.advice = Advice::kFixBusPlanning;
-        std::snprintf(r.text, sizeof(r.text),
+        const int wrote = std::snprintf(r.text, sizeof(r.text),
                       "%u joints @%s Hz, %s %u/%u bps: %s TX + %s RX frames/s = %s%% load "
                       "(limit %s%%), feedback %s Hz. Fix by: broadcast+heartbeat, or split "
                       "buses.",
                       n, rate, in.fd ? "FD" : "Classic", in.nominal_bitrate, in.data_bitrate, tx,
                       rx, load, limit, fb);
+        /* ⚠ Classic 的拒绍多一条出路：配置**漏写 `is_fd`** 时我们按 Classic 起步
+           （§13.3-46），而真有 FD 设备的客户会看到一句莫名其妙的“超预算”。
+           这里明说“你是 FD 就写 is_fd: true” —— 否则他只是看到拒绍，不知道差在哪。
+           ⚠ 分两次写（不用 `%s` 拼三元表达式）：GCC 的 `-Wformat-truncation` 按**类型上界**
+           估算，把变量长串塞进同一个 format 会把它推过 text[320] 的界限。 */
+        if (!in.fd && wrote > 0 && static_cast<std::size_t>(wrote) < sizeof(r.text)) {
+            std::snprintf(r.text + wrote, sizeof(r.text) - static_cast<std::size_t>(wrote),
+                          " If the device speaks CAN FD, set is_fd: true (Classic airtime is ~10x "
+                          "tighter).");
+        }
         return r;
     }
 

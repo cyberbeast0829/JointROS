@@ -138,6 +138,23 @@ void fault_cb(jsdk_joint_t *joint, const jsdk_fault_info_t *info, void *user) no
     (void)self->push_fault_pub(ev);
 }
 
+/* 把 SDK 的“帧格式学习结果”翻译成**可执行**的话（取值表见 `joint_sdk.h`）。
+   ⚠ 不翻译的后果真机实测过：Classic 设备 + 配置写了 FD 时，现场只有
+   “收得到心跳、我的请求没人应”，描述符下载卡在 `0/0 bytes`，而 API 一个字都不提示。 */
+const char *framing_learned_hint(int learned)
+{
+    switch (learned) {
+    case 0:  return "还没收到过本关节的帧（framing_learned=0）⇒ 无法判断对端是 Classic 还是 FD；"
+                    "请查接线/终端电阻/对端是否在发心跳";
+    case 1:  return "已自动改为 Classic（配置写了 is_fd=true，但对端在发 Classic 帧）⇒ "
+                    "请把配置改成 is_fd: false";
+    case 2:  return "已自动改为 FD（配置写了 is_fd=false，但对端在发 FD 帧）⇒ "
+                    "请把配置改成 is_fd: true";
+    case 4:  return "显式指定的帧格式与对端不一致（帧格式未改动）⇒ 请修正配置里的 is_fd";
+    default: return "与配置一致";
+    }
+}
+
 int raw_sink(jsdk_context_t * /*ctx*/, const void *data, size_t len, std::uint32_t offset,
              void *user) noexcept
 {
@@ -399,6 +416,15 @@ Status BusRuntime::open(const BusCfg &bus, std::uint32_t period_ns, const OpenOp
     c.hal = hal_->hal;
     c.master_id = bus_.master_id;
     c.is_fd = bus_.is_fd ? 1u : 0u;
+    /* ⚠⚠ `is_fd` 只是**猜测**：协议没有运行时协商，猜错时设备**根本不收**我们的帧，
+       现场只表现为“收得到心跳、但我的请求没人应”。真机实测：Classic 设备 + 默认 FD 配置
+       ⇒ 描述符下载卡在 `0/0 bytes`，而
+       API 一个字都不提示（找了半天）。
+       所以按 SDK 的**推荐组合**把 `is_fd_explicit` 置 0：SDK 在收到本关节第一帧时自动把发送
+       格式对齐到对端，并用 `jsdk_context_framing_learned()` 如实报告 —— 我们把 1/2 打成
+       “配置提醒”、把 0 打成“还没听到对端”（见 framing_learned_note）。
+       需要**强制**格式的客户以后可以加开关（置 1；SDK 冲突时返回 4 且不改帧）。 */
+    c.is_fd_explicit = 0u;
     c.period_ns = period_ns;
     c.state_timeout_ms = bus_.state_timeout_ms;
     /* ⚠ `CURRENT` 关节与 SDK 的 auto_keepalive 的关系（已核对 SDK 实现与它自己的测试）：
@@ -619,15 +645,22 @@ Status BusRuntime::configure(BusReport *rep, Result *res) noexcept
             if (attempt + 1u < bus_.desc.retries) sleep_ms(bus_.desc.retry_backoff_ms);
         }
         if (fst != JSDK_OK) {
-            set_last_error("descriptor download failed after %u attempt(s): %s (%s)", bus_.desc.retries,
-                           jsdk_status_string(fst), jsdk_context_last_error(ctx_));
+            /* ⚠ 这里最容易把客户卡死：`0/0 bytes` 一个字都不提示原因。真机实测的根因是
+               **帧格式猜错**（Classic 设备 + 配置写 is_fd=true ⇒ 设备根本不收我们的帧）——
+               而症状恰好也是"收得到心跳、请求没人应"。所以把 SDK 学到的对端格式一并报出来：
+               learned=0 说明压根没听到本关节的帧（查接线/电阻/心跳），
+               1/2 说明对端与配置不符（改配置的 is_fd）。§13.3-46 */
+            const int learned = jsdk_context_framing_learned(ctx_);
+            set_last_error("descriptor download failed after %u attempt(s): %s (%s; framing_learned=%d)",
+                           bus_.desc.retries, jsdk_status_string(fst),
+                           jsdk_context_last_error(ctx_), learned);
             if (res != nullptr) {
                 res->set(map_status(fst), Advice::kCheckBusConfig,
                          "bus '%s': descriptor download failed after %u attempt(s): %s — %s. "
-                         "On slcan the first frames after opening the port are often dropped; a "
-                         "retry usually succeeds. Otherwise check channel/bitrate/FD match.",
+                         "Framing: %s. On slcan the first frames after opening the port are often "
+                         "dropped (a retry usually succeeds); otherwise check channel/bitrate.",
                          bus_.name, bus_.desc.retries, jsdk_status_string(fst),
-                         jsdk_context_last_error(ctx_));
+                         jsdk_context_last_error(ctx_), framing_learned_hint(learned));
             }
             return map_status(fst);
         }
@@ -664,7 +697,14 @@ Status BusRuntime::configure(BusReport *rep, Result *res) noexcept
     unsigned attempt = 0u;
     for (attempt = 0u; attempt < bus_.desc.retries; ++attempt) {
         cst = jsdk_context_configure(ctx_);
-        if (cst == JSDK_OK) break;
+        if (cst == JSDK_OK) {
+            /* 配置成功 = 我们已经和这条总线说过话了 ⇒ 此时“帧格式学习结果”最有意义：
+               learned != 3 就是“配置里写的 is_fd 与对端不符，SDK 已自动对齐/或学不到”。
+               把它打出来，客户不必再面对“心跳收得到、请求没人应”的谜（§13.3-46）。 */
+            const int learned = jsdk_context_framing_learned(ctx_);
+            if (learned != 3) note_append("[warn] 帧格式：%s", framing_learned_hint(learned));
+            break;
+        }
         /* configure 的阻塞部分（读量程）同样可能因首帧丢失而超时 → 重试是现场必需。 */
         note_append("[warn] configure() attempt %u/%u failed: %s", attempt + 1u, bus_.desc.retries,
                     jsdk_status_string(cst));
@@ -710,12 +750,14 @@ Status BusRuntime::configure(BusReport *rep, Result *res) noexcept
             return Status::kOk;
         }
 
-        set_last_error("configure() failed after %u attempt(s): %s (%s)", bus_.desc.retries,
-                       jsdk_status_string(cst), jsdk_context_last_error(ctx_));
+        set_last_error("configure() failed after %u attempt(s): %s (%s; framing_learned=%d)",
+                       bus_.desc.retries, jsdk_status_string(cst),
+                       jsdk_context_last_error(ctx_), jsdk_context_framing_learned(ctx_));
         if (res != nullptr) {
             res->set(map_status(cst), advice_from(jsdk_context_last_error(ctx_)),
-                     "bus '%s': configure() failed: %s — %s", bus_.name, jsdk_status_string(cst),
-                     jsdk_context_last_error(ctx_));
+                     "bus '%s': configure() failed: %s — %s (%s)", bus_.name,
+                     jsdk_status_string(cst), jsdk_context_last_error(ctx_),
+                     framing_learned_hint(jsdk_context_framing_learned(ctx_)));
         }
         return map_status(cst);
     }

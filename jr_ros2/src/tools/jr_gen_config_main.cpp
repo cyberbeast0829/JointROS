@@ -31,6 +31,7 @@
 
 #include "jr_ros2/jr_config.hpp"
 #include "jr_ros2/jr_config_yaml.hpp"
+#include "jr_ros2/jr_gen_config_cfg.hpp"
 #include "jr_ros2/rt/jr_bus_runtime.hpp"
 #include "jr_ros2/rt/jr_identify.hpp"
 
@@ -51,7 +52,8 @@ struct Options {
     unsigned    probe = 16u;
     unsigned    master_id = 1u;
     double      rate_hz = 1000.0;
-    int         is_fd = -1;       /* -1 = 由设备 classic 位推断 */
+    int         is_fd = -1;       /* -1 = 未指定（Classic 起步，SDK 按对端帧对齐） */
+    unsigned    serial_baud = 115200u;  /* 仅 slcan：**串口**速率，不是 CAN 速率 */
     bool        allow_shared = false;
     bool        force = false;
 };
@@ -68,6 +70,7 @@ void usage()
         "  --if <kind>          总线后端（与配置里的 `type` 同义）\n"
         "  --channel <c>        socketcan/pcan/slcan = 接口名；virtual = sim spec\n"
         "                       （例：\"0:id=1,gear=7.75,pmax=12.5,vmax=65,tmax=50,hb=5\"）\n"
+        "  --serial-baud <N>    **仅 slcan**：串口速率（默认 115200；不是 CAN 速率）\n"
         "  --name <bus-name>    生成的配置里这条总线叫什么（默认：channel，或 'virt'）\n"
         "  --probe <N>          主动探测上限（默认 16；0 = 仅被动听心跳）\n"
         "  --master-id <M>      主站号（默认 1；⚠ 设备侧读不回来 → 生成文件里会点名要核对）\n"
@@ -137,6 +140,14 @@ bool parse_args(int argc, char **argv, Options *o, int *exit_code)
                 std::fprintf(stderr, "jr_gen_config: --is-fd 只接受 0 或 1（得到 '%s'）\n", v);
                 *exit_code = kExitUsage; return false;
             }
+        } else if (a == "--serial-baud") {
+            const char *v = value("--serial-baud"); if (!v) return false;
+            char *end = nullptr; const unsigned long n = std::strtoul(v, &end, 10);
+            if (end == nullptr || *end != '\0' || n < 1200ul || n > 4000000ul) {
+                std::fprintf(stderr, "jr_gen_config: --serial-baud 需要 1200..4000000（得到 '%s'）\n", v);
+                *exit_code = kExitUsage; return false;
+            }
+            o->serial_baud = static_cast<unsigned>(n);
         } else if (a == "--allow-shared") { o->allow_shared = true; }
         else if (a == "--force") { o->force = true; }
         else {
@@ -211,14 +222,18 @@ int main(int argc, char **argv)
 
     /* ---- ① 用默认配置开一条空总线（锁/ABI/零初始化 context 都走 BusRuntime::open） ---- */
     jr::Config cfg = jr::default_config();
-    cfg.buses[0] = jr::default_bus_cfg();
     cfg.bus_count = 1;
+    /* ⚠ “命令行 → 开总线用的字段”全部交给那个**纯函数**（离线可测，§13.3-47）：
+       slcan 的 `serial_baud` 与 `--is-fd` 必须**真的**落进去 —— 以前这两处都漏了，
+       于是“生成的配置自己都加载不了” + “在 Classic 设备上按 FD 扫描”。 */
+    jr::tools::ScanCfgOpts so;
+    so.channel = opt.channel;
+    so.bus_name = bus_name;
+    so.master_id = opt.master_id;
+    so.is_fd = opt.is_fd;
+    so.serial_baud = opt.serial_baud;
+    cfg.buses[0] = jr::tools::build_scan_bus_cfg(hal, so);
     jr::BusCfg &bc = cfg.buses[0];
-    std::snprintf(bc.name, sizeof bc.name, "%s", bus_name.c_str());
-    bc.hal = hal;
-    std::snprintf(bc.channel, sizeof bc.channel, "%s", opt.channel.c_str());
-    bc.master_id = static_cast<std::uint8_t>(opt.master_id);
-    bc.joint_count = 0u;   /* 扫描前还不知道有几个 */
 
     const std::uint32_t period_ns = static_cast<std::uint32_t>(1e9 / opt.rate_hz);
 
@@ -355,6 +370,12 @@ int main(int argc, char **argv)
         addf(&y, "      spec: \"%s\"\n", opt.channel.c_str());
     } else {
         addf(&y, "      interface: %s\n", opt.channel.c_str());
+    }
+    /* ⚠ slcan 的 schema **要求** serial_baud（漏了它，生成的配置连我们自己的加载器
+       都过不了 —— 加载器的“生成→回读”自检当场拒绍落盘，§13.3-47 ①）。
+       同时写清它是**串口**速率，不是 CAN 速率（两个量极易搞混）。 */
+    if (hal == jr::HalKind::kSlcan) {
+        addf(&y, "      serial_baud: %u         # 串口速率（不是 CAN 速率）\n", opt.serial_baud);
     }
     addf(&y, "      is_fd: %s\n", fd ? "true" : "false");
     addf(&y, "      master_id: %u\n", opt.master_id);
