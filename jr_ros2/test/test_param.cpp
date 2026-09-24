@@ -119,6 +119,41 @@ void test_roundtrip_and_equality()
     JR_CHECK_EQ(fv.as_i64(), 0);
 }
 
+/**
+ * 类型 → 服务消息字段（`jr_interfaces/msg/ParamValue.msg` 的契约）。
+ *
+ * ⚠ 这不是"把常量再抄一遍"：真机上踩过一次 —— 服务端与 CLI **各写了一份**映射表，
+ *   两边对 **u32** 的说法不同（服务端按契约放 `int64_value`，CLI 按码值 6 取 `uint64_value`），
+ *   于是所有 uint32 端点（`node_id`/`heartbeat_rate_ms`/`error`…）经 CLI 读出来**恒为 0**，
+ *   而 f32 正常（float 那一组两边恰好一致）。现在映射只有 `value_field_of()` 一份，
+ *   这个用例把**契约本身**钉死：谁把 u32 挪去别的字段，这里立刻红。
+ */
+void test_value_field_mapping()
+{
+    JR_CASE("类型 → 服务消息字段（u32 必须走 int64_value）");
+    JR_CHECK_EQ(value_field_of(ParamType::kBool), ValueField::kBool);
+    JR_CHECK_EQ(value_field_of(ParamType::kF32), ValueField::kDouble);
+    JR_CHECK_EQ(value_field_of(ParamType::kF64), ValueField::kDouble);
+    JR_CHECK_EQ(value_field_of(ParamType::kU64), ValueField::kUint64);
+    /* ↓ 回归点：u32 曾被显示层当成 `uint64_value`（那个字段没人写入 → 读出来恒 0）。 */
+    JR_CHECK_EQ(value_field_of(ParamType::kU32), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kU8), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kI8), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kU16), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kI16), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kI32), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kI64), ValueField::kInt64);
+    JR_CHECK_EQ(value_field_of(ParamType::kUnsupported), ValueField::kNone);
+
+    /* 覆盖面：每个**受支持**的类型都必须落到一个真实字段上（不许留下"没人写"的洞）。 */
+    const ParamType all[] = {ParamType::kBool, ParamType::kU8,  ParamType::kI8,  ParamType::kU16,
+                             ParamType::kI16, ParamType::kU32, ParamType::kI32, ParamType::kU64,
+                             ParamType::kI64, ParamType::kF32, ParamType::kF64};
+    for (ParamType t : all) {
+        JR_CHECK_MSG(value_field_of(t) != ValueField::kNone, param_type_name(t));
+    }
+}
+
 }  // namespace
 
 int main()
@@ -128,5 +163,6 @@ int main()
     test_floats_and_bool();
     test_unsupported_type();
     test_roundtrip_and_equality();
+    test_value_field_mapping();
     return jrtest::report();
 }

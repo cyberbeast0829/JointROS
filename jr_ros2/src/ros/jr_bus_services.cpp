@@ -925,22 +925,23 @@ void JrBusServices::on_read_params(const jr_interfaces::srv::ReadParams::Request
             v.joint = bus_cfg().joints[j].name;
             v.path = paths[p];
             v.type = type_code(it.declared_type);
-            /* 按**声明类型**放值（规则写在 ParamValue.msg 里；不按"我们猜的类型"）。 */
-            switch (it.declared_type) {
-            case ParamType::kBool:
+            /* 按**声明类型**放值（规则写在 ParamValue.msg 里，映射表**只有一份**：
+               `value_field_of()`）。服务端与 CLI 各写一份表的年代真机踩过一次：
+               两边对 u32 的说法不一致 ⇒ 所有 uint32 端点显示 0。 */
+            switch (value_field_of(it.declared_type)) {
+            case ValueField::kBool:
                 v.bool_value = it.value.v.b;
                 break;
-            case ParamType::kU64:
+            case ValueField::kUint64:
                 v.uint64_value = it.value.v.u64;
                 break;
-            case ParamType::kF32:
-            case ParamType::kF64:
+            case ValueField::kDouble:
                 v.double_value = it.value.as_double();
                 break;
-            case ParamType::kUnsupported:
-                break;
-            default:
+            case ValueField::kInt64:
                 v.int64_value = it.value.as_i64();
+                break;
+            case ValueField::kNone:
                 break;
             }
             if (it.declared_type != ParamType::kUnsupported) {

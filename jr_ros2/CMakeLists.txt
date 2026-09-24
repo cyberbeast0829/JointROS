@@ -305,6 +305,12 @@ if(JR_WITH_ROS AND yaml-cpp_FOUND)
     # ⚠ 必须用带命名空间的目标名（`rclcpp::rclcpp`）：裸名 `rclcpp` 会**链接不上 include 路径**，
     #   症状就是 `fatal error: rclcpp/rclcpp.hpp: No such file or directory`（实测踩过）。
     target_link_libraries(jr_ctl PRIVATE rclcpp::rclcpp jr_interfaces::jr_interfaces)
+    # ⚠ 必须显式给 include 目录：`jr_ctl` **不链 jr_core**（设计上不发 CAN 帧），
+    #   因此拿不到 jr_core 的 PUBLIC include 路径 —— 但它要 include 头文件内联的
+    #   `value_field_of()`（与服务端共用的那张"类型 → 消息字段"表，§13.3-48）。
+    #   漏了这一步的症状：`'ParamType' does not name a type`（只在 Linux 上会暴露 ——
+    #   Windows 的纯 CMake 构建根本没有 ROS，不编译这个工具）。
+    target_include_directories(jr_ctl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
     if(MSVC)
         target_compile_options(jr_ctl PRIVATE /W4 /utf-8)
     else()

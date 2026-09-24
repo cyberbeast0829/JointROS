@@ -59,6 +59,49 @@ struct ParamValue {
 bool param_values_equal(const ParamValue &a, const ParamValue &b) noexcept;
 
 /**
+ * 值在**服务消息**里该落到哪个字段（`jr_interfaces/msg/ParamValue.msg` 的契约）。
+ *
+ * ⚠ 为什么要有一个共享函数：这份"类型 → 字段"的映射原先**在服务端和 CLI 各写了一份**
+ *   （服务端 `switch (ParamType)`、CLI `switch (uint8 type_code)`），两份表对 **u32** 的说法
+ *   不一致 —— 服务端按契约放进 `int64_value`，CLI 却按"码值 6"取 `uint64_value` ⇒
+ *   **真机上所有 uint32 端点读出来都是 0**（`node_id`/`heartbeat_rate_ms`/`error`…
+ *   而 f32 正常，因为 float 那一组两边恰好一致）。合成一个函数后，"两边说不一致"这种
+ *   缺陷在结构上不再可能出现。
+ */
+enum class ValueField : std::uint8_t {
+    kNone = 0, /**< 不可读写的类型：**不编造**字段，如实报 unsupported */
+    kBool,     /**< → `bool_value` */
+    kInt64,    /**< → `int64_value`（**含 u8/u16/u32/i8/i16/i32/i64**：u32 装得进 int64） */
+    kUint64,   /**< → `uint64_value`（仅 u64：一律用它，即使值装得进 int64） */
+    kDouble    /**< → `double_value`（f32/f64） */
+};
+
+/**
+ * 单一映射点：**服务端（写消息）与 CLI（读消息）都调这个函数**。
+ *
+ * 做成 header-only（`inline`）：`jr_ctl` 设计上只链 `rclcpp` + `jr_interfaces`
+ * （它"一个 CAN 帧都不发"、不依赖 jr_core），但又必须与节点用**同一张表** ——
+ * 内联在头里同时满足这两条：既没有第二份表，也不用为一个枚举映射把整块 jr_core 链进工具。
+ */
+inline ValueField value_field_of(ParamType t) noexcept
+{
+    switch (t) {
+    case ParamType::kBool: return ValueField::kBool;
+    case ParamType::kU64:  return ValueField::kUint64;
+    case ParamType::kF32:
+    case ParamType::kF64:  return ValueField::kDouble;
+    /* ⚠ u32 走 int64（契约见 ParamValue.msg）：u32 值域 0..4294967295 装得进 int64。
+       真机踩过：CLI 曾把它按"码值 6"取 `uint64_value` ⇒ 所有 uint32 端点都显示 0。 */
+    case ParamType::kU8: case ParamType::kI8:
+    case ParamType::kU16: case ParamType::kI16:
+    case ParamType::kU32: case ParamType::kI32:
+    case ParamType::kI64:  return ValueField::kInt64;
+    case ParamType::kUnsupported: break;
+    }
+    return ValueField::kNone;
+}
+
+/**
  * 文本 → 值（按**端点声明的类型**装箱）。
  *
  * 拒绝的情况（都返回非 kOk，并把原因写进 `err`）：

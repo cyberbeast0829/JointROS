@@ -28,6 +28,11 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+/* ⚠ 这个工具**故意只链 rclcpp + jr_interfaces**（不发 CAN 帧、不依赖 jr_core），
+   但读参数显示时必须与节点服务端用**同一张**"类型 → 消息字段"映射表 ——
+   所以包含这个**头文件内联**的共用映射（`value_field_of()`），而不是自己再写一份。 */
+#include "jr_ros2/jr_param.hpp"
+
 #include "jr_interfaces/srv/calibrate.hpp"
 #include "jr_interfaces/srv/export_descriptor.hpp"
 #include "jr_interfaces/srv/fault_reset.hpp"
@@ -451,13 +456,25 @@ int cmd_read(rclcpp::Node::SharedPtr node, const Opts &o, const std::vector<std:
     if (!res->success) return kOpFailed;
     for (const auto &v : res->items) {
         std::printf("  %-12s %-44s %-11s ", v.joint.c_str(), v.path.c_str(), type_name(v.type));
-        switch (v.type) {
-        case 1: std::printf("%s\n", v.bool_value ? "true" : "false"); break;
-        case 8: case 6: std::printf("%llu\n", static_cast<unsigned long long>(v.uint64_value)); break;
-        case 2: case 3: case 4: case 5: case 7: case 9:
-            std::printf("%lld\n", static_cast<long long>(v.int64_value)); break;
-        case 10: case 11: std::printf("%.6g\n", v.double_value); break;
-        default:
+        /* ⚠ 显示用**同一张**字段映射表（`value_field_of`），不要在这里再写一份 `switch (v.type)`：
+           真机上就是因为 CLI 自己那份表把 u32（码值 6）归进了 `uint64_value`，
+           于是所有 uint32 端点都显示 0，而 f32 正常 —— 查了半天才定位到是显示层。
+           `v.type` 就是 `ParamType` 的序号（服务端 `type_code()` = static_cast），
+           所以回转成枚举是**精确**的。 */
+        switch (jr::value_field_of(static_cast<jr::ParamType>(v.type))) {
+        case jr::ValueField::kBool:
+            std::printf("%s\n", v.bool_value ? "true" : "false");
+            break;
+        case jr::ValueField::kUint64:
+            std::printf("%llu\n", static_cast<unsigned long long>(v.uint64_value));
+            break;
+        case jr::ValueField::kDouble:
+            std::printf("%.6g\n", v.double_value);
+            break;
+        case jr::ValueField::kInt64:
+            std::printf("%lld\n", static_cast<long long>(v.int64_value));
+            break;
+        case jr::ValueField::kNone:
             /* 不可读的类型：如实说"读不了"，不编一个值出来。 */
             std::printf("(%s)\n", status_name(v.status));
             break;
