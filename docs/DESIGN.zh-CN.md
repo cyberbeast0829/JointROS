@@ -1158,6 +1158,19 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 > 而是 `nodes_online=2` + 逐关节 `read`。同理 `jog:=true` 是**README 里写了的开关**，
 > 写了的就必须真跑（§13.3-43 末）。
 
+**④ 一条**未解决**的真机宿主现象（如实登记，**没有改代码**）：在真实 RT 测试机上跑 `launch_smoke` 时，
+`wait_active` 会报"没到 active"，**但 launch 自己的日志明明已经打出 `[demo] /vbusrp 已 active`** ——
+同一次运行里后续的 `jr_ctl status` / `read`（走服务、给 5 s 服务超时）反而**成功**。
+观察到的证据链：① 反复出现、跨两次运行；② 先把等待预算从 60 s 加到 120 s **无效**（仍然失败）
+⇒ 不是预算问题；③ 嫌疑落在 `wait_active` 里**单次探测**的 `timeout 5 ros2 lifecycle get`：
+这台机器上 `ros2` CLI 是**冷启动**（没有 `ros2 daemon`，每次现做 DDS 发现），单次超过 5 s 就可能
+被包裹超时**在发现完成前杀掉** ⇒ 循环永远拿不到 `active`。**但这只是假设**：我把"预算 120 s +
+单次探测 20 s"两处改动都在本机试过，因本机冷启动太慢、**没能跑完整条冒烟拿到绿**，所以
+**两处改动都已回退**（仓库里的 `launch_smoke` 仍是三发行版矩阵验证过的原样）。
+列为首项待办：容器矩阵里复现不了（那里 ~30 s 就到 active），要在真机宿主上先量一次
+"`ros2 lifecycle get` 单次到底多久"，再决定是**放宽单次探测超时**还是**换判据**
+（比如直接用 `jr_ctl status` rc=0 当"已 active"的证据 —— 那才是客户真正关心的）。
+
 #### 13.2h 真机联调（Ubuntu 22.04 + PREEMPT_RT + **真实关节**，v0.17）
 
 在客户同款测试机（`5.15.0-1112-realtime`、4 核、MCS CyberBeast USB2CAN → `/dev/ttyACM0`、
