@@ -378,6 +378,28 @@ void test_calibrate_and_jog()
     JR_CHECK(tg.bus(0).jog(0u, t, 20000u, true, &r) == Status::kInvalidArgument);
     JR_CHECK_CONTAINS(r.message, "10000");
 
+    /* ⚠ F10 回归：kp=kd=torque=0 = **零力矩** MIT 目标 —— 电机不会动，但旧代码会把
+       "使能→保持→失能"跑完并报成功（真机 jr_ctl jog 不带增益就是这样）。
+       必须**在碰设备之前**拒掉：所以这里顺带断言关节没有被使能。 */
+    {
+        JointTarget zero;
+        zero.position = 0.05;          /* 只给位置、不给任何增益/前馈 */
+        const Status st_zero = tg.bus(0).jog(0u, zero, 200u, true, &r);
+        std::printf("  jog(全零增益) → %s | %s\n", to_string(r.status), r.message);
+        JR_CHECK(st_zero == Status::kInvalidArgument);
+        JR_CHECK_CONTAINS(r.message, "zero-torque");
+        JR_CHECK_MSG(!tg.bus(0).active(), "全零增益的点动必须在碰设备之前被拒（不得使能）");
+    }
+    /* 反向对照：kp/kd=0 但给前馈力矩 —— 不是"零力矩"，应当被放行（不是一刀切拒绝）。 */
+    {
+        JointTarget tau_only;
+        tau_only.position = 0.0;
+        tau_only.torque = 0.2;
+        const Status st_tau = tg.bus(0).jog(0u, tau_only, 100u, true, &r);
+        std::printf("  jog(仅前馈 0.2 N·m, 100ms) → %s | %s\n", to_string(r.status), r.message);
+        JR_CHECK_MSG(st_tau == Status::kOk, r.message);
+    }
+
     const Status st_jog = tg.bus(0).jog(0u, t, 200u, true, &r);
     std::printf("  jog(200ms) → %s | %s\n", to_string(r.status), r.message);
     JR_CHECK_MSG(st_jog == Status::kOk, r.message);

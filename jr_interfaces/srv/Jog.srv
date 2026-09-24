@@ -5,9 +5,12 @@
 
 string joint                       # 单个关节（点动不做批量：批量点动很容易出事故）
 float64 position                   # rad（输出端）
-float64 kp                         # WIRE 语义的 MIT 增益（0 = 用配置里的默认）
+float64 kp                         # WIRE 语义的 MIT 增益
 float64 kd
 float64 torque                     # N·m 前馈
+# ⚠ kp/kd/torque **不许全为 0**：那是"零力矩"目标，电机会纹丝不动，
+#   而整套使能/保持/失能流程仍会跑完并报成功（真机上踩过，见 DESIGN §13.3-49）。
+#   旧注释写的"0 = 用配置里的默认"是个**空承诺** —— 配置里没有这组默认值，节点会直接拒。
 float64 duration_s                 # 执行时长（>10 直接拒绝）
 bool confirm                       # 闸门：必须显式 true
 ---

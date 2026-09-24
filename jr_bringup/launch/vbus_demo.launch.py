@@ -73,6 +73,10 @@ def _jog_actions(bus, node):
                         ExecuteProcess(cmd=ctl + ['enable'], output='screen'),
                         TimerAction(period=3.0, actions=[
                             ExecuteProcess(cmd=ctl + ['jog', '--joint', 'j1', '--pos', '0.05',
+                                                     # ⚠ 增益必须**显式**给：kp=kd=tau=0 是零力矩
+                                                     # 目标，节点会直接拒（§13.3-49）。这个示例的
+                                                     # 本意是"让关节真动一下"，所以给较小增益。
+                                                     '--kp', '2.0', '--kd', '0.2',
                                                      '--duration-s', '0.5', '--confirm'],
                                            output='screen'),
                         ]),

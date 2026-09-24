@@ -879,6 +879,29 @@ Status BusRuntime::jog(unsigned local_index, const JointTarget &target, unsigned
         }
         return Status::kInvalidArgument;
     }
+
+    /* ⚠ F10：kp=kd=torque=0 的 MIT 目标 = **零力矩**，电机根本不会动；
+       可是使能 → 保持 → 失能整套流程照样跑完，还返回"成功"。真机上
+       `jr_ctl jog --confirm` 不带增益时就是这个样子：命令报成功、关节纹丝不动。
+       这就是"说得比知道的多"——宁可在这里拒掉，也不报一个没发生过的动作。
+       （`Jog.srv` 原先写"kp=0 表示用配置里的默认"，但配置里**根本没有**这组默认值，
+        所以那个承诺是空的；见 §13.3-49。） */
+    {
+        const double kp = target.si_gain ? target.stiffness : target.kp;
+        const double kd = target.si_gain ? target.damping : target.kd;
+        if (kp == 0.0 && kd == 0.0 && target.torque == 0.0) {
+            if (res != nullptr) {
+                res->set(Status::kInvalidArgument, Advice::kCheckBusConfig,
+                         "refused: kp=kd=torque=0 is a **zero-torque** MIT target — the joint "
+                         "cannot move (the enable/hold/disable sequence would still 'succeed', "
+                         "which is exactly the trap). Pass kp/kd (wire units, see the joint's "
+                         "kp_max/kd_max) or a feedforward torque; if zero torque is really what you "
+                         "want, use disable (no motion) instead of jog.");
+            }
+            return Status::kInvalidArgument;
+        }
+    }
+
     if (!ops_window_ok(res, "jog")) return Status::kInvalidState;
 
     /* ⚠ Jog 是** MIT 语义**的动作（跑到一个位置并 PD 保持）：它内部用 MIT 使能 +

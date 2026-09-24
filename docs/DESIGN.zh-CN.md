@@ -1158,6 +1158,27 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 > 而是 `nodes_online=2` + 逐关节 `read`。同理 `jog:=true` 是**README 里写了的开关**，
 > 写了的就必须真跑（§13.3-43 末）。
 
+#### 13.2h 真机联调（Ubuntu 22.04 + PREEMPT_RT + **真实关节**，v0.17）
+
+在客户同款测试机（`5.15.0-1112-realtime`、4 核、MCS CyberBeast USB2CAN → `/dev/ttyACM0`、
+**Classic @1 Mbps**、真实电机+驱动器、**空载可自由旋转**）上做了一轮"能动的都动一遍"，
+暴露并修掉 **4 个仿真/CI 永远看不到**的缺陷（§13.3-46…50）。证据全部落在"**同一时刻两个实现对拍**"上：
+
+| 项 | 观测方式 | 结果 |
+|---|---|---|
+| RT 调度真的生效（§9.1 的真机口径） | 节点自报 + 实测 | 配 `limits.d/99-jointros.conf`（rtprio 99 / memlock unlimited）+ `kernel.sched_rt_runtime_us=-1` **之前**：`SCHED_FIFO` **EPERM**、实测 `SCHED_OTHER`、`throttled=1`；**之后**：`measured policy=SCHED_FIFO(prio=80)`、**`throttled=0`** |
+| 链路可靠性（slcan，非估计值） | `scan` / `info` / 读参数各 10~14 次 | `scan` **10/10**；`info` **11/14**（≈1/10 的**首帧丢失**是 slcan 的固有特性，重试即可）；所有成功读回的数值**互相一致**，没有"rc=0 但值是垃圾" |
+| **F9：所有 uint32 端点读出恒 0** | 三源对拍（SDK CLI / 自写 C 探针 / 我们节点内部打印），详见 §13.3-48 | **已修**：宽度矩阵 26 个端点修前 3 处不一致 → 修后 **24 一致**；剩 2 条是 `encoder.shadow_count`/`count_in_cpr`，同一路径连读 10 次得 `849…854` ⇒ **活计数器**，不是解码错 |
+| **F10：零增益点动"成功"** | 真关节：`jr_ctl jog --confirm`（不带增益） | **已修**：修后 `rc=1` + `actual_duration=0.00 s`，被拒后设备仍可读、`current_state=1`（**守卫生效在碰设备之前**）；对照 `--kp 2 --kd 0.2` → `300 ms / 272 ticks`，收尾失能（§13.3-49） |
+| **F11：反馈帧 pos/vel 与真值不一致** | 我们的 `/joint_feedback` vs 端点真值 vs SDK `mon`（§13.3-50） | **未修（如实登记）**：SDK 自己就报 `FEEDBACK_STALE`（`status_flags=8`），帧里的值**冻结在早先时刻**（`fet_temperature=30.0` 而真值已 32.1）；而**端点轮询这条路是好的**（`pos_estimate`/`vel_estimate` 每次自洽）⇒ 是"这条源不供数"，不是我们解码错 |
+| `calib` / `home` 的真机路径 | — | **未验证**（如实登记）：真机上被 `estop` 锁存挡住（§13.4）；虚拟设备上这两个状态机没实现 ⇒ 这一格目前**两边都没有正例** |
+
+> ⚠ 这一轮最有价值的不是"发现了 bug"，而是**找到 bug 的方法**：凡是"设备看起来不对"，
+> 先做**同一时刻的对拍**（SDK CLI ↔ 自写探针 ↔ 我们节点内部打印），把范围从"设备/固件/我们"
+> 三段收敛到一段，**再**动代码。§13.3-46…50 五条都是这么定位的。
+> 反面教材也在同一轮里：我从 `health.vbus_V=0` 两次误判"总线没上电"，真值是端点
+> `vbus_voltage=23.09 V`（§13.3-50 记录了同一类"两条源"的坑）。
+
 ### 13.3 实现期撞到的真问题（已修，记录以免重犯）
 
 1. **Windows 的排他字节范围锁会挡住其它句柄读**（连未曾锁定的字节也读不到）。
@@ -1652,6 +1673,76 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
     - 教训：**“只有真机能到达的代码路径”等于“线上没有守卫”**。把这类映射收进纯函数、
       用**真闸门**（而不是逐字段对拍）做断言，就能把它拉回离线可测的范围。
 
+48. **⚠⚠ 同一份映射写了两遍，两边只要有一格不同 ⇒ 显示层的 bug 会伪装成"设备故障"（v0.17，真机）**：
+    症状：经我们的节点读**所有 uint32 端点**（`node_id` / `heartbeat_rate_ms` / `error`…）**恒为 0**，
+    而 f32 端点正常（`gear_ratio=7.75` / `pos_gain=20`）⇒ 第一反应是"这台设备/固件对 u32 有问题"。
+    定位（三步都是对拍，没有一步靠猜）：
+    ① **SDK 自己的 CLI** 读同一条路径 → `100` / `1`，正确；
+    ② **自写 C 探针**直连 SDK（单条 `jsdk_joint_param_get` + 批量 `jsdk_joint_param_get_batch`）
+       → `type=5 u32=100`，正确 ⇒ **设备与 SDK 都被排除**；
+    ③ 在我们节点 `read_params()` 里**临时**打印 SDK 交回的原始值 → **交给我们时就是对的**
+       （`type=5 u32=100`）⇒ 问题在"收到之后"。
+    读代码即见真因：**"类型 → 消息字段"这张表被写了两份** —— 服务端按 `ParamValue.msg` 的契约
+    把 u8/u16/**u32**/i8/i16/i32/i64 都放进 `int64_value`；而 `jr_ctl` 自己那份 `switch (uint8 type)`
+    按"码值 6"把 u32 归进 `uint64_value`（那个字段**根本没人写入** ⇒ 恒 0）。
+    float 那一组两边恰好一致，所以**只有 u32 现形**。
+    - 修法（结构上消除复现，不是改对一处）：映射只留 `value_field_of()` 一份，做成
+      **header-only `inline`**。故意的：`jr_ctl` 设计上只链 `rclcpp` + `jr_interfaces`
+      （"一个 CAN 帧都不发"、不依赖 `jr_core`），却又**必须**与节点用同一张表 ⇒ 内联同时满足两条。
+      ⚠ 顺带暴露一条**构建覆盖缺口**：**Windows 的纯 CMake 构建根本不编译 `jr_ctl`**（那里没有 ROS）
+      ⇒ "ROS 侧工具"的编译错误只在 Linux/容器上出现。本次连吃两次：先 `'ParamType' does not name a type`
+      （缺 include 目录），再 `jr::value_field_of` 命名空间。
+    - 验证（真机**宽度矩阵**：8 种类型 26 个端点，逐条与 SDK CLI 对照）：
+
+      | 阶段 | 结果 |
+      |---|---|
+      | 修前 | **3 处不一致**（全部是 uint32：`node_id` 1→0、`heartbeat_rate_ms` 100→0、`error` 0→0） |
+      | 修后 | **24 一致**；剩 2 条 `encoder.shadow_count` / `count_in_cpr`（int32） |
+      | 那 2 条是 bug 吗？ | **不是**：同一路径连读 10 次得 `849…854` ⇒ **活计数器**（两次读数间隔约一分钟）。如实记录，不当成"已修" |
+    - 离线守卫：`test_param.cpp::test_value_field_mapping()` 钉住契约（12 项 + 覆盖面）；
+      **变异测试**：把 `value_field_of(kU32)` 改回 `kUint64`（= 复现原缺陷）⇒ 用例 **FAIL 1**
+      （`got 3, expected 2`），还原后 **PASS 82**。
+    - 教训：① **"两个实现对拍"**是分离"设备/SDK/我们"的最快手段（三轮对拍把范围收敛到 30 行）；
+      ② 同一份"映射/翻译"**只准存在一处** —— 两份表只要差一格，就会以"某类端点全体失效"的形态出现；
+      ③ **别先怀疑设备**：先把自己**收到的原始值**打出来。
+
+49. **⚠ 零力矩的 `jog` 会"成功"，而 srv 注释替它做了一个空承诺（v0.17，真机）**：
+    真机上 `jr_ctl jog --joint j1 --pos 0.02 --duration-s 0.3 --confirm`（**不带增益**）：
+    命令**报成功**、`exit_reason` 正常、关节**纹丝不动**。原因：`kp=kd=torque=0` 的 MIT 目标是
+    **零力矩**，电机本就不动；而"使能 → 保持 → 失能"整套流程照样跑完 ⇒ **说得比知道的多**。
+    更糟的是 `Jog.srv` 里写着 `kp  #（0 = 用配置里的默认）`，而配置里**根本没有**这组默认值
+    （§13.4：增益不进静态配置）—— 那个承诺是空的。
+    - 修法：守卫加在**核心** `BusRuntime::jog()`（一处生效：服务 / CLI / 直调用全覆盖）：
+      MIT 三件套全 0 一律 `kInvalidArgument`，并告诉用户可以给 `kp/kd`（wire 单位，参考设备
+      `kp_max/kd_max`）或**前馈力矩**；真想要零力矩请用 `disable`。守卫放在**碰设备之前** ⇒ 被拒后关节仍失能。
+      同时改掉 `Jog.srv` 的空承诺文案，并给 `jr_bringup` 的 `jog:=true` 示例**补上显式增益**。
+    - 真机验证：全零增益 → `rc=1`、`actual_duration=0.00 s`、**被拒后设备仍可读**（`current_state=1`，从未使能）；
+      对照：`--kp 2 --kd 0.2` → `jog finished on 'j1': 300 ms / 272 ticks`，收尾失能安全态。
+    - 离线守卫：`test_ops` 加"全零增益必须拒 + **不得使能**"，外加**反向对照**"只给前馈力矩应当放行"
+      （避免一刀切）；**变异测试**：把 `torque == 0.0` 改成 `!= 0.0` ⇒ 用例 **FAIL 3**，还原后 **PASS 99**。
+    - 教训：**"命令成功"不等于"事情发生"** —— 动作型 API 至少要有一个**能证明它发生**的判据
+      （位置变化 / 力矩非零 / 至少拒掉"必然无效"的输入），否则它只是在正确地走流程。
+
+50. **⚠⚠ 反馈帧与轮询真值不一致时，先问"哪条源"，别先改解码（v0.17，真机；未修，如实登记）**：
+    症状：我们发布的 `/joint_feedback` 里 `position`/`velocity` 与设备端点真值对不上
+    （`position=0.0422` vs `pos_estimate=0.0520`；`velocity=+0.0159` vs `-0.0076`），有时**冻结不动**；
+    `bus_voltage=0` 而端点 `vbus_voltage=23.09 V`。判定实验（三条源同时刻对照）：
+    ① 我们的反馈（= SDK `jsdk_joint_get_feedback()` 解出来的帧）：**SDK 自己就打了 `FEEDBACK_STALE`**
+       （`status_flags=8`），且值**冻结在早先时刻**（`fet_temperature=30.0` 而端点真值已 32.1）
+       ⇒ **不是"我们解错了"，是"这条源没在供数"**；
+    ② 改用 SDK 的 `unicast_poll`（`feedback: unicast_poll`）**更糟**：`age_ms` 涨到 **2773 ms**、
+       4/4 端点读**全部失败** ⇒ 该策略在本链路（slcan/Classic）不可用；
+    ③ **端点轮询这条路是好的**：`pos_estimate`/`vel_estimate`/温度每次读回都自洽，且与 SDK CLI 一致
+       （见 §13.3-48 的宽度矩阵）。
+    - 结论（诚实版）：**反馈帧（由 8 字节心跳承载）在本链路/本固件上不提供有效反馈**；
+      我们只是**忠实地把陈旧值当"当前值"发布**了 —— 这正是 §13.2h "别信 `age_ms=0`"那条。
+    - **未修**，登记为下一轮首项：① 反馈**优先用参数轮询**（`pos_estimate`/`vel_estimate`，已验证正确），
+      把帧反馈降级为"可用则用"；② `age_ms` 在 `FEEDBACK_STALE` 时**不能报 0**
+      （现在它量的是"距上次调用成功"，看着像新鲜）；③ 与上游确认这版固件的心跳载荷定义。
+    - 教训：**"反馈值不对"有两条完全不同的病因** —— 解码错 vs 源头陈旧。判据是"**有没有第二源**"：
+      先找一条**已知正确**的源（参数轮询）对拍，再决定改哪边；而且**上游自带的 `stale` 标志是一等公民**
+      —— 看到 `status_flags=8` 时就该当场停下"解码"这条思路。
+
 ### 13.3b 自查（代码审阅）发现并修的问题
 
 | # | 问题 | 影响 | 修法 |
@@ -1692,6 +1783,10 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | 服务/诊断的创建时机 | §8.1 只规定 `configure` 做 `open→configure` | 服务与诊断在 **`on_activate` 建、`on_deactivate` 拆**（与 tick 线程同一时机） | 与 `READY`/`ACTIVE` 语义一致：只有 ACTIVE 才对外提供操作面；`configure` 可重复/可清理，不提前占资源 |
 | 服务 QoS 实参 | 未涉及 | 加 `make_service()` 兼容层（`if constexpr` 探测 rclcpp 的签名） | rclcpp 的第 3 个参数类型在 Humble→Iron 之间换过；见 §13.3-27 |
 | `RtStats.cmd_to_tx_ns` | §6.1 写 mean/p99 | 给 mean/**last**/max | 核心库只对**抖动**做了直方图；不为一个字段再加一套分桶（要 p99 时再说，不伪造） |
+| **单 master 锁的键（F7，待修）** | §7.2 写的是"CAN 通道的跨进程排他锁" | 实现按 **总线名**（`/var/lock/jr-<bus>.lock`）而不是**物理通道** ⇒ 同一台 `/dev/ttyACM0` 上写**两个不同总线名**的两份配置（如 `axis1` 与 `axis2`）**不会互相排斥**，两个 master 会真的上同一条总线；而头注释已把意图写成"通道锁" | 修法：键改按**物理通道**（`type+interface`），**消息里仍报总线名**便于定位；配一个离线用例：两个总线名指向同一通道 ⇒ 第二个必须被拒（当前会拿到锁） |
+| **`jsdk-cli` 完全不可拦（F8，已如实登记）** | 文档需回答"客户在同一总线上又开了 `jsdk-cli` 会怎样" | SDK 侧**没任何锁**（全仓 grep 无 `flock`/`lockf`/`O_EXCL`/信号量调用；slcan HAL 只是 `open(name, O_RDWR\|O_NOCTTY\|O_NONBLOCK)`，那里的 `#include <fcntl.h>` 只是为 `open()` 的常量，别被 grep 误导）⇒ SDK 不参与我们的锁，**技术上无法排除** | 所以文档从"我们保证互斥"**降级为运维纪律**：节点跑着时**只能**用 `jr_ctl`（走服务）；"单 master"是我们能保证的那一半，另一半得靠客户遵守 |
+| **反馈来源（F11，未修）** | §6.1 把 `position/velocity/effort` 当成当前状态发布 | 实现在默认策略（`broadcast_heartbeat`）下**忠实转发反馈帧的值**，而本链路/本固件上该帧**陈旧不更新**（SDK 自己报 `FEEDBACK_STALE`）⇒ 话题里是"看起来新鲜、实际冻结"的值 | 见 §13.3-50：优先改用**参数轮询**（已验证正确）作为反馈源，帧反馈降级；`age_ms` 不得在 `stale` 时报 0 |
+| `calib` / `home` 的**真机**路径（仍待验证） | §6.2 描述其前置条件与读回语义 | 真机上一轮被 `estop` **锁存**挡住（`error` 原始位 `0x4000`）：`write error 0` 读回后又转回、`fault-reset`（`STOP_MOTOR`→`CLEAR_ERRORS`）也不清，**只有 `reset`（软复位）或断电重启能清**（重启后 `error=0` / `fault=false`）。解不开锁存的关节会**挡住** `calibrate`/`home` | 登记为固件侧问题（F29）+ 文档里给出恢复步骤；SDK 两个 CLI 都已提供 `fault-reset`（不动电机）并在失败时提示可试 `reset` 或断电重启 |
 
 ---
 
@@ -1707,6 +1802,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | v0.6 | 2026-09-22 | **WP3（`ros2_control`，P0 最优先）落地**：新增 `jr_ros2_control`（`SystemInterface`，`tick_source=internal|controller_manager`、`gain_mode=wire|si`、生命周期与安全落点、`compat/` 集中发行版差异）与 `jr_config_yaml`（与节点/工具**共用**的 §6.4 YAML schema，未知键报错）；`jr_core` 增加**外部驱动 tick**（`start_external()`/`step()`，与内部线程模式共用同一条 `run_cycle()`）。**Jazzy 与 Humble 双双实测绿**（组件测试 74 断言；`colcon test` 11 tests / 0 failures）。期间修掉真问题：外部模式**永远无法使能**的守卫自相矛盾（§13.3-15）、`jsdk::can` 别名缺失、ament 导出集顺序导致的 `jr_ros2::jr_core` 找不到、静态库缺 `-fPIC`。§13.2 补 WP3 行，§13.3 增至 16 条。**待办**：`JointTrajectoryController` 端到端示例（WP7 的一部分）尚未跑，列为下一步。 |
 | v0.7 | 2026-09-22 | **主目标发行版 Lyrical 打通 + JTC 端到端（三发行版）**：新增 `docker/run.sh lyrical`（Ubuntu 26.04 / gcc 15.2 / **CMake 4.2.3**）；`jr_ros2_control/test/jtc_demo/`（`robot_state_publisher` + `controller_manager` + JSB/JTC + 虚拟总线，发 1.5 s 轨迹并断言终点误差）在 **Humble / Jazzy / Lyrical 三发行版全部 PASS**（终点误差 0.008 rad，三边数值一致）。期间修掉四个真问题：① 签名判定**不能用 CMake 探测**（`check_cxx_source_compiles` 的迷你工程拿不到传递 include → 三发行版全探测失败，且失败时变量是**空串** → 静默走错分支 → Humble 才爆；改为 `__has_include` + 静态断言，并用变异测试证明守卫「会响」，§13.3-18/19）；② CMake 4 起含 C 源的包必须 `project(x C CXX)`（§13.3-17）；③ 基础镜像与 apt 仓库**错批**导致运行期 `undefined symbol`（构建全绿也照挂）→ 镜像里先 `apt-get upgrade`（§13.3-20）；④ 控制器参数必须 `spawner --param-file` 显式传（Lyrical 不再继承 CM 全局参数，§13.3-21）。§9.1 回填 Lyrical 实测基线，§13.2 增 Lyrical 列与 JTC 证据表（13.2b），风险 U1 关闭、U3 缓解。 |
 | v0.8 | 2026-09-22 | **WP2 第一段落地（`jr_interfaces` + `jr_bus` 节点）**：新增 `jr_interfaces`（**16 msg + 19 srv**，只依赖 `std_msgs`/`builtin_interfaces`）与节点层目标 `jr_node`/可执行 `jr_bus`（一个节点 = 一条总线）：配置加载与校验、`open→configure`、`~/cmd_mit`/`~/estop`/`/jr/estop_all` → 无锁信箱、快照 → `joint_feedback`/`joint_states`/`bus_status`/`rt_stats`/`faults`、退出序列（含 SIGINT 走同一条 lifecycle 路径）。**三发行版实测**：`ctest` 10/10、`colcon test` **17 tests / 0 failures / 0 告警**、JTC 端到端 PASS、节点级测试（真 DDS）PASS。核心库补齐 `RtStats` 的 min/mean（§6.1 承诺的字段不能空着）。期间撞到并修掉：① **核心库真 bug：快照从不填关节名**（节点测试按名字找关节时立刻暴露；货已发给客户就是"话题里全是空字符串"，已加回归断言）；② rosidl 包的 `package.xml` **组名与元素顺序**两个坑（`ament_xmllint`）；③ 节点测试曾用 `tx_frames` 绝对值断言"没发控制帧"（configure 阶段的描述符/参数帧也在里面 → `got 29, expected 0`）→ 改为**增量**口径；④ 容器脚本失败时把 `colcon test` 明细吞掉了（`set -e`），现在先打 `--verbose` 明细再退出；⑤ 两处 WP3 时期遗留的告警（`-Wconversion`、新发行版 `return_type::DEACTIVATE` 的 `-Wswitch`）。§13.2 增 13.2c（节点级证据表），§13.4 补 WP2 偏差。**待办**：服务层（19 个服务 + ADR-7 安全暂停 + §8.5 写闸门）、§6.5 诊断、§10.2 剩余用例（双 master/描述符中断/广播降级）。 |
+| v0.17 | 2026-09-24 | **真机联调一轮（PREEMPT_RT + 真实关节、Classic/slcan）**：把"能动的都动一遍"，暴露并修掉 **4 个仿真/CI 永远看不到**的缺陷，并新增 §13.2h（真机证据表）。① **F9：所有 uint32 端点经我们的节点读出来恒 0** —— 真因是"类型 → 消息字段"这张表**服务端与 `jr_ctl` 各写了一份**（服务端按契约给 u32 放 `int64_value`，CLI 按码值 6 取 `uint64_value` ⇒ 恒 0），f32 那组两边恰好一致所以只有 u32 现形；修法：映射只留 `value_field_of()` 一份并做成 **header-only inline**（`jr_ctl` 只链 `rclcpp`+`jr_interfaces`，不链 `jr_core`，但又必须与节点同表）；真机**宽度矩阵**（8 类型 26 端点，与 SDK CLI 逐条对照）修前 3 处不一致 → 修后 **24 一致**（剩 2 条是 `encoder.shadow_count`/`count_in_cpr`，连读 10 次得 849…854 ⇒ **活计数器**，非解码错）；离线用例 `test_value_field_mapping()` + 变异（kU32 改回 kUint64 ⇒ FAIL）。② **F10：零力矩点动会"成功"** —— `kp=kd=torque=0` 的 MIT 目标是零力矩，电机不动而整套流程照走完并报成功，且 `Jog.srv` 里"0 = 用配置里的默认"是个**空承诺**（配置里根本没这组值）；修法：守卫加在核心 `jog()`（碰设备之前），并给 `jr_bringup` 的 `jog:=true` 示例补上显式增益；真机实测：全零 ⇒ `rc=1` / `actual_duration=0.00 s` / `current_state=1`（从未使能），对照 `--kp 2 --kd 0.2` ⇒ `300 ms / 272 ticks`；离线正/反两向用例 + 变异（⇒ FAIL 3）。③ **F11：反馈帧与端点真值不一致（未修）** —— 判定实验证明是"**这条源不供数**"而不是我们解码错（SDK 自己报 `FEEDBACK_STALE`、帧值冻结在早先时刻；改用 `unicast_poll` 更糟：`age_ms=2773 ms` 且 4/4 端点读失败；而**端点轮询这条路每次自洽**）⇒ 登记为下一轮首项（反馈优先用参数轮询、`age_ms` 不得在 stale 时报 0）。④ 同轮还确认了 RT 调度真的生效（配 `limits.d` + `sched_rt_runtime_us=-1` 之前 `SCHED_FIFO` EPERM/throttled=1，之后 `SCHED_FIFO(prio=80)`/throttled=0）与链路可靠性（`scan` 10/10、`info` 11/14 ⇒ ≈1/10 首帧丢失是 slcan 固有特性）。§13.3 增至 **50** 条（新增 -48…-50）；§13.4 补 4 行（**F7 锁键按总线名而非物理通道**、**F8 `jsdk-cli` 无锁不可拦**、F11 反馈来源、`calib`/`home` 真机仍未验证 + estop 锁存恢复步骤）。**未做**（如实登记）：F7/F8 的代码修复（已写成可执行的偏差条目）、F11 的修复、`calib`/`home` 真机正例。 |
 | v0.16 | 2026-09-23 | **WP7 落地：新包 `jr_bringup`（示例与启动）**。内容：`vbus_demo.launch.py`（2 关节 / `joints:=1` / `jog:=true`）、`humanoid_2bus.launch.py`（两总线 + `robot_state_publisher` + 示例 URDF）、三份配置（`vbus_1joint` / `vbus_2joint` / `humanoid_2bus`）、`urdf/humanoid_2bus.urdf`、`docs/URDF.zh-CN.md`（谁拥有什么 + 三条硬约束：命令接口集必须匹配 `joints[].mode`、关节名必须与配置逐字一致、Jazzy+ 的 CM 从 `/robot_description` 话题读 URDF）、`README.md`（一条命令用法 + “为什么必须走 lifecycle”），以及 **ctest `launch_smoke`**（真跑 `ros2 launch`，断言节点真的走到 `active`、服务/话题真的建起来、`jr_ctl` 真的调得通；`jog:=true` 那条路也真跑）。**lifecycle 编排用 `TimerAction` + `matches_action` + `OnStateTransition('configuring'→'inactive')`** —— 不靠 `ros2 lifecycle set` 外部命令，因为示例要证明的是“launch 一条命令能复现”。期间撞到并修掉五件事（§13.3-40…44）：① **手写的“按节点名匹配”匹配器让 lifecycle 静默停摆**（`Node.node_name` 在执行前抛 `RuntimeError`，`getattr(..., None)` 吞不掉 ⇒ CONFIGURE 根本没发出去，日志一句错都没有；改用公开的 `matches_action`）；② **`tick_groups` 才是“节点打开的单位”** —— 用人形示例第一版把两条总线放进同一组，第二个进程直接死在 `bus_lock` 上（单总线进程的日志里 `2 bus(es)` 就是信号）；③ 冒烟的**等待预算不能用「轮数 × 间隔」算**（每轮 `ros2 lifecycle get` 自身 ~1 s ⇒ 传 60 s 实际等 6 分钟，这正是第一次 `ctest` 420 s 超时的原因）；④ 冒烟断言要落在**真有的证据**上（`jr_ctl status` 打印总线级快照、不含关节名表；改断言 `nodes_online=N` + `read --joints j1,j2` 两个关节都能寻到，两条互为对照）；⑤ 快迭代脚本**只拷 `launch/` 忘拷 `config/`** ⇒ ③ 用例一直在测过期 YAML；⑥ `add_test` 直接跑脚本路径 —— 本仓库索引里所有文件都是 `100644`（无执行位），而 Windows 挂载**把所有文件都报成可执行** ⇒ 本机/容器/CI 全绿，客户在 Linux 上克隆才 `Permission denied`（§13.3-45）。**验收**（本轮改动后复跑三发行版）：`bash docker/run.sh <distro>` **全 rc=0**；`ctest`（无 ROS 路径）**12/12**；`colcon test` **22 tests / 0 errors / 0 failures**（比 v0.15 多 1 个 = `launch_smoke`；且 `jr_bringup` 的**测试**阶段耗时 31.3/29.8/36.0 s，而同包**构建**只要 0.25–0.41 s ⇒ 这 30 多秒就是冒烟在真起 launch，不是“用例被跳过”）；JTC 端到端 mit + csp 仍 PASS。**变体测试证明冒烟有牙齿**（§13.2f）：把 launch 的匹配器换回①里那个坏写法 ⇒ `launch_smoke ***Failed 375.4 s`（用例自报 2 通过 / 12 失败），复原后 ⇒ `Passed 29.3 s`（15 通过 / 0 失败），两次都按**测试结果**判定。**未做**（如实登记）：MoveIt 示例；`jtc_demo` 的 `ros2 launch` 包装（其 `run.sh` 已是端到端入口）。 |
 | v0.15 | 2026-09-23 | **收掉 WP5 的最后一项（描述符往返），并修掉它顺手暴露的两个真问题；同时更正 v0.14 的一处误判**。真因：`jsdk_context_desc_import_raw()` 的 `hint` 是**必填**（`!hint ⇒ JSDK_ERR_INVALID_ARG`，头文件与源码第一句都写了），而我们传了 `nullptr` ⇒ “导出→导入”永远失败；v0.14 把它归因成“导出格式 ≠ 导入要求”是**错的**（§13.3-38 记了三条可复用的教训：别从症状反推格式、自己的解释性文案不能是猜测、契约里写了但没实现的字段要明确拒绝）。改动：`DescHintPOD{crc,fw}` 进核心库的 `import_descriptor()`；`ImportDescriptor.srv` 增加必填语义的 `crc`/`fw_version` 与响应 `data_crc32`（把“版本 CRC”与“数据 CRC32”分开 —— 此前两者都叫 `crc`）；`ExportDescriptor.srv` 的 `crc` 收窄为 `uint16`（与 SDK 的 `jsdk_desc_hint_t` 同宽）；`persist`（写设备 Flash）**明确拒绝**（SDK 没有这个能力，此前是**静默忽略**）。**第二轮（同日，被新用例暴露出来的）**：导入一个**截断**的 JSON 会把内存里的描述符**整个废掉** —— SDK 的 `store_init()` 在解析**之前**执行，而 `configure()` 不会再下载（探针四段对比：①② 正常（`matched 41`）、③ 表没了、④ 再 configure 也救不回来）⇒ 加**回滚护栏**（失败时用现役 JSON + 它的 crc/fw 原样恢复一次；回滚不成则**如实说明**“描述符已被摧毁且无本地副本 ⇒ 重开总线/重启节点”），并让服务在“描述符被改动过”时都重新 `configure()` 重新解析；顺带把 `WriteParams` 里 `lookup_endpoint()` 失败**静默退回 `kUnsupported`** 的误导（上层报“类型不支持”、真因却丢失）改成**就地报真因**。**实测**：`jr_ctl_services` **68 项检查 / 0 失败**（含三条证伪：截断 JSON 必失败、`--persist` 必被拒、**失败导入之后 `read`/`write` 仍可用**）；三发行版 `bash docker/run.sh <distro>` **全 rc=0**（`ctest` 12/12、`colcon test` 21 tests / 0 failures、JTC 端到端 mit + csp PASS）；本机（无 ROS）**10/10**；§13.3-39 / §13.2e / §13.4 已同步（§13.4 里那条“载荷格式不一致”的旧归因已标注为**误判**） |
 | v0.14 | 2026-09-23 | **WP4 收尾：`jr_bus_plan` + `jr_ctl` 落地**（至此 5 个承诺工具中 4 个已实现；只剩 P1 的 `jr_latency_bench`）。`jr_bus_plan`：非 ROS 薄 CLI，复用核心的 `plan_bus()` 报每条总线的负载/帧率/每拍耗时与是否可行（rc=0 可行 / 1 不可行 / 2 用法），与 `jr_hw_verify`/`jr_gen_config` 共用 `tools_virtual`。`jr_ctl`：对标 `jsdk-cli` 但**只走服务**（因此可以在节点跑着的时候用），19 个子命令覆盖读/写/使能/标定/回零/点动/复位/node-id 等，退出码约定 0 成功 / 1 操作失败 / 2 用法 / **4 服务不可达**。**三发行版实测**：`ctest` **12/12**、`colcon test` **21 tests / 0 failures**、JTC 端到端 mit + csp 仍 PASS。期间撞到并修掉六件事（§13.3-36）：① **多读者三缓冲撕裂读**（大坑，见下）；② 生命周期节点**没有 autostart** —— `ros2 run` 只是“活着”但不建服务，必须先 `configure` 再 `activate`（否则 `jr_ctl` 全部 rc=4）；③ 设计表里写的是**类型名**（`SetEnabled`），节点实际注册的是 **snake_case**（`~/set_enabled`）⇒ `jr_ctl` 要转换，且**排障以 `ros2 service list` 为准**；④ CMake 里必须用 `rclcpp::rclcpp` 而不是裸 `rclcpp`（后者只给了文件名、没给 include 路径）；⑤ 测试里工作区 `setup.bash` 不能从二进制路径推（测试跑在 build 树里，install 是**兄弟目录**）⇒ 由 CMake 从 `CMAKE_INSTALL_PREFIX` 算好后用环境变量传给测试；⑥ 位置参数要**按子命令**解释（`node-id <joint> <new_id>` 的第一个位置参数是关节名，而 `desc-export <file>` 是文件名）—— 混了就是 `joint '' is not on bus`（报错点离病因很远）。另外把 `WriteParams` 的空 `joint` 语义补上（**空 = 总线唯一关节**，多关节必须点名，绝不猜）。**未实现**：`jr_latency_bench`（P1）；`ImportDescriptor` 与 `ExportDescriptor` 载荷格式不一致（已如实登记，§13.4）。**收尾补账（同日）**：① §11 验收口径第③条（“生成的 YAML 能被节点直接加载”）此前只证到**加载器**级别 ⇒ 新增 `jr_ctl_services` 第 ⑦ 段真跑“生成 → 起 `jr_bus` → configure+activate → 认出只存在于生成文件里的关节 `j3`”，并用 `ctest -V` 数出 **60 项检查 / 0 失败**（`ctest` 对通过的用例不打印输出，所以“条数”必须另跑一次 `-V` 拿）；② §11 里“`jr_hw_verify --if virtual`”这个**写法与实现不符**（实现是后端由配置 `type:` 决定）⇒ 改文案（能力本身是达成的，先确认了这一点才改）；③ 自查发现两条“**永远不会红**”的等待循环（`… && break` 循环后看 `$?`，跑满时取到 `sleep` 的 0）⇒ 改成显式标志位，其中一条是**既有**用例里的旧洞 |
