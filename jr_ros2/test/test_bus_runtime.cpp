@@ -829,6 +829,37 @@ void test_mode_commands()
     run_mode_case(CmdMode::kCurrent, "模式化命令：current");
 }
 
+/**
+ * 反馈"年龄"的诚实口径（F11，真机）：
+ * SDK 会一边报 `FEEDBACK_STALE`（头文件原话“反馈超时（age_ms 超阈值）”）一边报 `age_ms=0`，
+ * 于是**冻结在早先时刻的值看起来“刚刚才更新”**。这里钉住我们的口径：
+ * 新鲜 ⇒ 用设备侧年龄；陈旧从未新鲜过 ⇒ `kFeedbackAgeUnknown`（不编数字）；
+ * 陈旧但有历史 ⇒ 真实经过时间（并饱和）。
+ */
+void test_feedback_age_is_honest()
+{
+    JR_CASE("反馈年龄：陈旧时不许报 0（F11）");
+    constexpr std::uint64_t kS = 1000000000ull;
+    constexpr std::uint64_t kJan = 5ull * kS;   /* 进程起点附近的某个“从未”时刻 */
+
+    /* ① 新鲜：直接用设备侧年龄（它比我们更有意义） */
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, false, 37u), 37u);
+
+    /* ② 陈旧 + 从未见过新鲜帧 ⇒ 不许编一个数字（历史上这里报的是 0，看着像“刚刚”） */
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, 0u), kFeedbackAgeUnknown);
+
+    /* ③ 陈旧 + 有历史 ⇒ 真实经过时间；**关键断言：不可能是 0** */
+    const std::uint64_t fresh = 100ull * kS;
+    const std::uint32_t age = feedback_age_ms(fresh + 2500ull * 1000000ull, fresh, true, 0u);
+    JR_CHECK_EQ(age, 2500u);
+    JR_CHECK_MSG(age != 0u, "陈旧帧的年龄不许是 0");
+
+    /* ④ 饱和：极端经过时间不能溢出成“新鲜” */
+    const std::uint32_t big = feedback_age_ms(~0ull, 1ull, true, 0u);
+    JR_CHECK_EQ(big, kFeedbackAgeStaleCap);
+    JR_CHECK_MSG(big != kFeedbackAgeUnknown, "饱和值必须与“未知”哨兵区分开");
+}
+
 }  // namespace
 
 int main()
@@ -841,5 +872,6 @@ int main()
     test_command_timeout_fires();
     test_over_planning_rejected();
     test_lock_excludes_second_owner();
+    test_feedback_age_is_honest();
     return jrtest::report();
 }

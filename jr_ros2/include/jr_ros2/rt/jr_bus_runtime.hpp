@@ -454,8 +454,29 @@ private:
     /* 广播下发需要"上一次目标"（SDK 的 group_set_mit 要显式的目标值，不会自己回读）。 */
     JointTarget last_target_[kMaxJointsPerBus] = {};
     bool        has_target_[kMaxJointsPerBus] = {};
+    /** 最近一次拿到**非陈旧**反馈的时刻（tick 时钟；0 = 从未拿到过）。
+     *  为什么自己记：见 `feedback_age_ms()` 的注释。 */
+    std::uint64_t last_fresh_ns_[kMaxJointsPerBus] = {};
     char        snapshot_note_[160] = {};
 };
+
+/**
+ * 反馈"年龄"（毫秒）—— **我们自己的口径**，不直接转发 SDK 的 `age_ms`。
+ *
+ * ⚠ 为什么不能直接转发（v0.17 真机）：SDK 在**同一个反馈里**一边报
+ *   `JSDK_JF_FEEDBACK_STALE`（头文件原话：“反馈超时（**age_ms 超阈值**）”），
+ *   一边报 `age_ms = 0` —— 自相矛盾。真机上实测就是这样（`status_flags=8` + `age_ms=0`），
+ *   于是**一个冻结在早先时刻的值看起来“刚刚才更新”**。宁可我们自己算：
+ *
+ *  - 不陈旧 ⇒ 返回 SDK 的 `age_ms`（那是**设备侧采样**的年龄，比我们更有意义）；
+ *  - 陈旧 且从未见过新鲜帧 ⇒ `kFeedbackAgeUnknown`（不知道，别编）；
+ *  - 陈旧 且有历史 ⇒ `now - last_fresh_ns`（饱和到 `kFeedbackAgeStaleCap`）。
+ */
+constexpr std::uint32_t kFeedbackAgeUnknown = 0xFFFFFFFFu;  /**< "未知 / 从未新鲜过" */
+constexpr std::uint32_t kFeedbackAgeStaleCap = 0xFFFFFFFEu; /**< 陈旧年龄的饱和上限 */
+
+std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns, bool stale,
+                              std::uint32_t sdk_age_ms) noexcept;
 
 }  // namespace rt
 }  // namespace jr

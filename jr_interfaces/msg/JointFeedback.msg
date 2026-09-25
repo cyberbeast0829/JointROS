@@ -18,7 +18,13 @@ float64 fet_temperature         # °C
 float64 bus_voltage             # V（来自心跳）
 float64 bus_current             # A（来自心跳）
 
-uint32 age_ms                   # 距上次**有效**反馈的时间
+uint32 age_ms                   # 距上次**有效**反馈的时间。
+                                # ⚠ 这不是 SDK 的 `age_ms` 直传：SDK 会一边报 FEEDBACK_STALE
+                                #   （其头文件原话是“反馈超时（age_ms 超阈值）”）一边报 age_ms=0，
+                                #   直传会显得“刚刚才更新”。我们的口径（见 feedback_age_ms()）：
+                                #   不陈旧 → SDK 的设备侧采样年龄；陈旧且有历史 → 真实经过时间；
+                                #   陈旧且从未新鲜过 → 0xFFFFFFFF（kFeedbackAgeUnknown“未知”）。
+                                #   所以：判“值能不能用”请看 feedback_stale/status_flags，年龄只是辅助。
 
 uint32 status_flags             # SDK JSDK_JF_* 位（原始位；含 FEEDBACK_STALE / WATCHDOG_* / TARGET_REJECTED）
 uint16 mode_state               # 固件原始 nibble（0..7），排障用

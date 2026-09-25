@@ -1766,8 +1766,20 @@ void BusRuntime::request_disable_all() noexcept
     }
 }
 
+std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns, bool stale,
+                              std::uint32_t sdk_age_ms) noexcept
+{
+    if (!stale) return sdk_age_ms;                  /* 新鲜 ⇒ 用设备侧的采样年龄（更有意义） */
+    if (last_fresh_ns == 0u) return kFeedbackAgeUnknown;   /* 从未新鲜过 ⇒ 不编一个数字 */
+    const std::uint64_t ms = (now_ns - last_fresh_ns) / 1000000ull;
+    return (ms >= static_cast<std::uint64_t>(kFeedbackAgeStaleCap))
+               ? kFeedbackAgeStaleCap
+               : static_cast<std::uint32_t>(ms);
+}
+
 void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept
 {
+    const std::uint64_t now = now_ns();
     if (ctx_ == nullptr || bus_index >= kMaxBuses) return;
 
     jsdk_bus_state_t bs;
@@ -1798,6 +1810,8 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
         jsdk_joint_feedback_t fb;
         std::memset(&fb, 0, sizeof fb);
         const bool have = (jsdk_joint_get_feedback(joints_[j], &fb) == JSDK_OK);
+        const bool stale = have && ((fb.status_flags & 0x0008u) != 0u);   /* JSDK_JF_FEEDBACK_STALE */
+        if (have && !stale) last_fresh_ns_[j] = now;
 
         JointStatePOD &o = s.joints[g];
         /* ⚠ 名字必须填：ROS 侧按名字投影消息（`JointFeedback.name` / `JointState.name`）。
@@ -1815,7 +1829,8 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
             o.fet_temperature = fb.t_fet_C;
             o.bus_voltage = fb.vbus_V;
             o.bus_current = fb.ibus_A;
-            o.age_ms = fb.age_ms;
+            /* ⚠ 不直接转发 SDK 的 `age_ms`：它会与 STALE 标志自相矛盾（见头文件注释）。 */
+            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], stale, fb.age_ms);
             o.err_code = fb.err_code;
             o.hb_error = fb.hb_error;
             o.axis_error = fb.axis_error;
@@ -1828,6 +1843,12 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
             o.target_rejected = (fb.status_flags & 0x0001u) != 0u;      /* JSDK_JF_TARGET_REJECTED */
             o.feedback_stale = (fb.status_flags & 0x0008u) != 0u;       /* JSDK_JF_FEEDBACK_STALE */
             o.watchdog_unverified = (fb.status_flags & 0x0040u) != 0u;  /* JSDK_JF_WATCHDOG_UNVERIFIED */
+        } else {
+            /* 拿不到反馈（`!have`）：旧值会留在快照里，**必须标清楚它不是新鲜的**，
+               否则上层（话题/日志）会把上一拍的值当当前值用 —— “说得比知道的多”。 */
+            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], true, 0u);
+            o.valid_fresh = false;
+            o.feedback_stale = true;
         }
         o.enabled = (jsdk_joint_is_enabled(joints_[j]) != 0);
         o.calibrated = report_.joint[j].calibrated;
