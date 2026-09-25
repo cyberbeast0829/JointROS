@@ -69,6 +69,22 @@ wait_ready() {
   return 1
 }
 
+# 等某个话题出现（返回 0 = 看到了）。
+# ⚠ 同一个病根：`ros2 topic list` 也是**冷启动 CLI**，在真机 RT 宿主上单次可能 >20 s。
+#   原来写成 `timeout 20 ros2 topic list | grep -q …` ⇒ 探测在列出来之前就被杀 ⇒ **假红**
+#   （真机上实测：整份冒烟 17 通过 / 1 失败，唯一失败的正是这条）。所以同样给"预算 + 单次超时"。
+wait_topic() {
+  local topic="$1" seconds="${2:-60}" deadline
+  deadline=$((SECONDS + seconds))
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    if timeout "$JR_READY_PROBE_S" ros2 topic list 2>/dev/null | grep -q "$topic"; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  return 1
+}
+
 stop_launch() {
   pkill -f "$1" 2>/dev/null || true
   pkill -f "jr_bus" 2>/dev/null || true
@@ -116,7 +132,7 @@ if timeout 30 ros2 run jr_ros2 jr_ctl --node vbusrp --timeout-ms 5000 read --joi
 else
   bad "read --joints j1,j2 失败"; tail -6 "$WORK/rd2.log"
 fi
-if timeout 20 ros2 topic list 2>/dev/null | grep -q "/vbusrp/joint_states"; then
+if wait_topic "/vbusrp/joint_states"; then
   ok "话题 /vbusrp/joint_states 存在（activate 之后才建）"
 else
   bad "没有 /vbusrp/joint_states 话题"
@@ -197,7 +213,7 @@ if timeout 30 ros2 run jr_ros2 jr_ctl --node leg_right --timeout-ms 5000 \
 else
   bad "右侧关节寻不到（F12 回归？）"; tail -6 "$WORK/rdr.log"
 fi
-if timeout 20 ros2 topic list 2>/dev/null | grep -q "robot_description"; then
+if wait_topic "robot_description"; then
   ok "robot_state_publisher 已发布 robot_description（示例 URDF 可用）"
 else
   bad "没有 robot_description（URDF 示例没起作用）"
