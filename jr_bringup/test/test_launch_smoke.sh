@@ -44,18 +44,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 等某个生命周期节点走到 active（返回 0 = 到了）
-# ⚠ 用**墙上时钟**做预算，不要用“轮数 × 间隔”：每轮 `ros2 lifecycle get` 自己还要 ~1 s，
-#   60 s 的预算会变成 6 分钟以上（第一次跑就这么超时过）。传入的 seconds 必须是真上限。
-wait_active() {
-  local node="$1" seconds="$2" deadline st
+# 等某条总线上的节点**对外可用**（返回 0 = 好了）。
+#
+# ⚠ 判据为何是“服务可调”而不是 `ros2 lifecycle get`（v0.17 真机教训）：
+#   ① 服务是 `on_activate` 里才建的（§13.3-36）⇒ **服务可调 ≡ 已经是 ACTIVE**，语义等价；
+#   ② 这才是客户真正关心的“能不能用”；
+#   ③ `ros2 lifecycle get` 是**冷启动 CLI**（没 daemon 时要现做发现），在真机 RT 宿主上
+#      单次可能 >5 s，被外层 `timeout` 在发现完成前杀掉 ⇒ **无论预算多大都永远报“没到 active”**，
+#      而 launch 自己的日志明明已打出“已 active”（实测：同一份日志里 `已 active` 出现 **7** 次、
+#      5 条断言全 FAIL）—— 症状极具误导性，看起来像 launch 或预算坏了。
+#   预算是**墙上时钟**（每轮探测自身要几百 ms~4 s，不能用“轮数 × 间隔”算）。
+JR_READY_BUDGET_S="${JR_READY_BUDGET_S:-180}"
+JR_READY_PROBE_S="${JR_READY_PROBE_S:-25}"
+wait_ready() {
+  local bus="$1" seconds="${2:-$JR_READY_BUDGET_S}" deadline
   deadline=$((SECONDS + seconds))
   while [ "$SECONDS" -lt "$deadline" ]; do
-    st="$(timeout 5 ros2 lifecycle get "/$node" 2>/dev/null | tr -d '\r')" || st=""
-    case "$st" in
-      active*) return 0 ;;
-    esac
-    sleep 0.2
+    if timeout "$JR_READY_PROBE_S" ros2 run jr_ros2 jr_ctl --node "$bus" \
+         --timeout-ms 4000 status > /dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
   done
   return 1
 }
@@ -68,13 +77,20 @@ stop_launch() {
   sleep 2
 }
 
+echo "===== 0) 负向对照：等待器必须**能失败**（否则后头的“已就绪”只是空转）====="
+if wait_ready vbusrp_nonexistent 12; then
+  bad "对不存在的节点名等待器也返回成功 ⇒ 用例没牙齿"
+else
+  ok "对不存在的节点名等待器会超时失败（等待器有牙齿）"
+fi
+
 echo "===== ① 虚拟总线 demo：一条 ros2 launch 起 2 关节并走到 active ====="
 ros2 launch jr_bringup vbus_demo.launch.py > "$WORK/vbus.log" 2>&1 &
 LAUNCH_PID=$!
-if wait_active vbusrp 60; then
-  ok "「ros2 launch jr_bringup vbus_demo.launch.py」→ /vbusrp active"
+if wait_ready vbusrp; then
+  ok "「ros2 launch jr_bringup vbus_demo.launch.py」→ /vbusrp 服务可调（= 已 active）"
 else
-  bad "60 s 内没到 active"; tail -30 "$WORK/vbus.log"
+  bad "${JR_READY_BUDGET_S} s 内服务没建起来（= 没到 active）"; tail -30 "$WORK/vbus.log"
 fi
 # ⚠ 服务是否真的建起来，才是生命周期节点的坑（§13.3-36）
 if timeout 30 ros2 run jr_ros2 jr_ctl --node vbusrp --timeout-ms 5000 status > "$WORK/st.log" 2>&1; then
@@ -112,10 +128,10 @@ echo "===== ①b jog:=true —— README 里承诺的“起来后自动点动”
 #   虚拟总线上安全；真机上这条路径别随手跑。
 ros2 launch jr_bringup vbus_demo.launch.py jog:=true > "$WORK/jog.log" 2>&1 &
 LAUNCH_PID=$!
-if wait_active vbusrp 60; then
-  ok "「jog:=true」→ /vbusrp active"
+if wait_ready vbusrp; then
+  ok "「jog:=true」→ /vbusrp 服务可调（= 已 active）"
 else
-  bad "jog 例子里没到 active"; tail -20 "$WORK/jog.log"
+  bad "jog 例子里 ${JR_READY_BUDGET_S} s 内服务没建起来"; tail -20 "$WORK/jog.log"
 fi
 # 编排是「active 后 1 s enable → 再 3 s jog(0.5 s)」⇒ 给 40 s 等它把结果打出来。
 for _ in $(seq 1 40); do grep -q "exit_reason=" "$WORK/jog.log" && break; sleep 1; done
@@ -140,10 +156,10 @@ stop_launch "vbus_demo.launch.py"
 echo "===== ② 单关节 demo（joints:=1）====="
 ros2 launch jr_bringup vbus_demo.launch.py joints:=1 > "$WORK/vb1.log" 2>&1 &
 LAUNCH_PID=$!
-if wait_active vbusrp 60; then
-  ok "「joints:=1」→ /vbusrp active（用 config/vbus_1joint.yaml）"
+if wait_ready vbusrp; then
+  ok "「joints:=1」→ /vbusrp 服务可调（= 已 active，用 config/vbus_1joint.yaml）"
 else
-  bad "单关节 demo 没到 active"; tail -20 "$WORK/vb1.log"
+  bad "单关节 demo ${JR_READY_BUDGET_S} s 内服务没建起来"; tail -20 "$WORK/vb1.log"
 fi
 timeout 30 ros2 run jr_ros2 jr_ctl --node vbusrp --timeout-ms 5000 status > "$WORK/st1.log" 2>&1 \
   && grep -q "nodes_online=1" "$WORK/st1.log" \
@@ -156,10 +172,31 @@ stop_launch "vbus_demo.launch.py"
 echo "===== ③ 人形双总线示例：两个节点都要 active ====="
 ros2 launch jr_bringup humanoid_2bus.launch.py > "$WORK/hum.log" 2>&1 &
 LAUNCH_PID=$!
-wait_active leg_left 60 && ok "/leg_left active" || { bad "/leg_left 没到 active"; tail -25 "$WORK/hum.log"; }
-wait_active leg_right 60 && ok "/leg_right active" || { bad "/leg_right 没到 active"; tail -25 "$WORK/hum.log"; }
+wait_ready leg_left  && ok "/leg_left 服务可调（= 已 active）" \
+  || { bad "/leg_left ${JR_READY_BUDGET_S} s 内服务没建起来"; tail -25 "$WORK/hum.log"; }
+wait_ready leg_right && ok "/leg_right 服务可调（= 已 active）" \
+  || { bad "/leg_right ${JR_READY_BUDGET_S} s 内服务没建起来"; tail -25 "$WORK/hum.log"; }
 timeout 30 ros2 run jr_ros2 jr_ctl --node leg_left --timeout-ms 5000 status > /dev/null 2>&1 \
   && ok "左侧总线的服务可调（jr_ctl status rc=0）" || bad "左侧 jr_ctl 失败"
+# ⚠ F12 回归：**第二条总线**必须能读到**自己的**数据面证据。
+#   真机上这条曾经永远失败：节点的 `bus_index_` 是**配置级**下标（leg_right = 1），
+#   而快照 `buses[]` / `tg_->bus()` 是**tick 组内**下标（该进程组内只有 1 条 ⇒ 0）
+#   ⇒ `1 >= bus_count(1)` ⇒ 永远 “no snapshot yet”；关节过滤 `j.bus_index != bus_index_`
+#   也全不匹配 ⇒ 该节点的 `/joint_feedback`、`/joint_states`、诊断、动关节服务**全废**。
+#   左侧恰好两个下标都是 0，所以旧冒烟（只查左侧服务）一直是绿的 —— 这两条断言就是补这个洞。
+if timeout 30 ros2 run jr_ros2 jr_ctl --node leg_right --timeout-ms 5000 status > "$WORK/str.log" 2>&1 \
+     && grep -q "nodes_online=2" "$WORK/str.log"; then
+  ok "右侧总线读到**自己的**统计（nodes_online=2 ⇒ F12 不回归）"
+else
+  bad "右侧总线拿不到统计（F12 回归？）"; tail -5 "$WORK/str.log"
+fi
+if timeout 30 ros2 run jr_ros2 jr_ctl --node leg_right --timeout-ms 5000 \
+     read --joints FR_hip,FR_knee --paths axis0.config.can.heartbeat_rate_ms > "$WORK/rdr.log" 2>&1 \
+     && grep -q "^  FR_hip " "$WORK/rdr.log" && grep -q "^  FR_knee " "$WORK/rdr.log"; then
+  ok "右侧关节能被寻到（FR_hip/FR_knee ⇒ 关节过滤也用对下标）"
+else
+  bad "右侧关节寻不到（F12 回归？）"; tail -6 "$WORK/rdr.log"
+fi
 if timeout 20 ros2 topic list 2>/dev/null | grep -q "robot_description"; then
   ok "robot_state_publisher 已发布 robot_description（示例 URDF 可用）"
 else
