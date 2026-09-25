@@ -61,7 +61,8 @@ inline const char *to_string(HalKind h) noexcept
     return "?";
 }
 
-/** `type:` 文本 → `HalKind`；**不认识就返回 false**（绝不猜一个后端）。
+/**
+ * `type:` 文本 → `HalKind`；**不认识就返回 false**（绝不猜一个后端）。
  *
  *  与 `load_config_yaml()` 同义（那边用 `need_enum` 拒绝未知值，取空值才走默认）——
  *  这里只是给命令行/TUI 复用的同一份映射，不另立规矩。 */
@@ -379,6 +380,24 @@ unsigned total_joint_count(const Config &cfg) noexcept;
 
 /** 某总线第一个关节的全局索引。 */
 unsigned bus_joint_base(const Config &cfg, unsigned bus_index) noexcept;
+
+/**
+ * 单 master 锁的**键**（F7）：锁按**物理通道**取，不按总线名。
+ *
+ * 以前键 = 总线名 ⇒ 同一个 `/dev/ttyACM0` 上写两份配置（`name:` 不同）**不会互斥**，
+ * 两个 master 会真的同时上同一条总线（而 `jr_bus_lock.hpp` 的注释一直宣称那是"通道的排他锁"）。
+ *
+ * 规则（⚠ 两个方向都要对，测试里两个方向都有断言）：
+ *  - `socketcan`/`slcan`/`pcan` ⇒ `"<hal>:<channel>"`（如 `slcan:/dev/ttyACM0`）—— 要争的是物理资源；
+ *  - `virtual` ⇒ `"virtual:<bus name>"`：每个进程各有**自己的**仿真设备（`humanoid_2bus` 示例里
+ *    两条 virtual 总线的 `spec:` **完全相同**也不共享任何东西）⇒ 若把它们互斥，演示与 CI 全卡死；
+ *  - `channel` 为空（配置校验本该拦住）⇒ 退回总线名，免得退化成"所有总线共用一个键"。
+ *
+ * ⚠ 键会被拼成 `/var/lock/jr-<键>.lock`（`BusLock` 内部做文件名清洗，`/` 会变 `_`）。
+ *   改键会换文件名 ⇒ 旧的 `jr-<总线名>.lock` 成为**无害的历史残留**（锁是 OS 对文件的锁，
+ *   空文件本身不持锁），不需要清理脚本，但文档要说清。
+ */
+void lock_key(const BusCfg &bus, char *out, std::size_t cap) noexcept;
 
 }  // namespace jr
 

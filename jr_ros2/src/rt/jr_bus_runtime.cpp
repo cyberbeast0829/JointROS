@@ -315,12 +315,19 @@ Status BusRuntime::open(const BusCfg &bus, std::uint32_t period_ns, const OpenOp
     /* ---- ③ 单 master 锁 ---- */
     if (opt.enable_lock) {
         char msg[512] = {};
+        /* ⚠ 锁键按**物理通道**而不是总线名（F7）：同一个 `/dev/ttyACM0` 上两份不同 `name:`
+           的配置也能互斥；virtual 例外（进程内仿真，见 `lock_key()` 的注释）。 */
+        char key[192] = {};
+        lock_key(bus_, key, sizeof(key));
         const Status lst =
-            lock_.acquire(bus_.name, opt.lock_dir, opt.allow_shared_lock, msg, sizeof(msg));
+            lock_.acquire(key, opt.lock_dir, opt.allow_shared_lock, msg, sizeof(msg));
         note_append("[info] %s", msg);
         if (lst != Status::kOk) {
-            set_last_error("%s", msg);
-            if (res != nullptr) res->set(lst, Advice::kEnsureSingleMaster, "%s", msg);
+            /* 失败时把**总线名**一并说清：键是通道，客户看的是总线名，两个都得给。 */
+            char full[640] = {};
+            std::snprintf(full, sizeof(full), "%s (bus '%s')", msg, bus_.name);
+            set_last_error("%s", full);
+            if (res != nullptr) res->set(lst, Advice::kEnsureSingleMaster, "%s", full);
             bus_ = BusCfg{};
             return lst;
         }

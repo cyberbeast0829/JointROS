@@ -93,9 +93,19 @@ unsigned bus_joint_base(const Config &cfg, unsigned bus_index) noexcept
     return base;
 }
 
-unsigned total_joint_count(const Config &cfg) noexcept
+void lock_key(const BusCfg &bus, char *out, std::size_t cap) noexcept
 {
-    unsigned n = 0u;
+    if (out == nullptr || cap == 0u) return;
+    /* virtual：锁的是"同一个名字的那份仿真"，不是物理资源（见头文件注释）。 */
+    if (bus.hal == HalKind::kVirtual || bus.channel[0] == '\0') {
+        std::snprintf(out, cap, "%s:%s", to_string(bus.hal), bus.name);
+        return;
+    }
+    std::snprintf(out, cap, "%s:%s", to_string(bus.hal), bus.channel);
+}
+
+unsigned total_joint_count(const Config &cfg) noexcept
+{    unsigned n = 0u;
     for (unsigned i = 0u; i < cfg.bus_count && i < kMaxBuses; ++i) {
         n += cfg.buses[i].joint_count;
     }

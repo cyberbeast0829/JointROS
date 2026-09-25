@@ -860,6 +860,76 @@ void test_feedback_age_is_honest()
     JR_CHECK_MSG(big != kFeedbackAgeUnknown, "饱和值必须与“未知”哨兵区分开");
 }
 
+/**
+ * ⚠ F7（真机发现）：锁的键必须是**物理通道**，不是总线名。
+ *
+ * 以前按总线名取锁 ⇒ 同一个 `/dev/ttyACM0` 上写两份配置（`name:` 不同）**不会互斥**，
+ * 两个 master 会真的同时上同一条总线（而接口注释一直宣称那是"通道的排他锁"）。
+ * 反过来**不能过度互斥**：两条 `virtual` 总线各自仿真自己的设备（示例里 `spec:` 完全相同），
+ * 把它们互斥会把 `humanoid_2bus` 演示与 CI 全卡死 —— 所以两个方向都要断言。
+ */
+void test_lock_key_follows_channel()
+{
+    JR_CASE("F7：锁键按物理通道；virtual 不互相牵连");
+
+    char k1[192] = {};
+    char k2[192] = {};
+
+    /* ① 同一个串口通道、两个不同总线名 ⇒ 键必须**相同**（这就是修复点） */
+    BusCfg a = default_bus_cfg();
+    std::snprintf(a.name, sizeof(a.name), "%s", "axis1");
+    a.hal = HalKind::kSlcan;
+    std::snprintf(a.channel, sizeof(a.channel), "%s", "/dev/ttyACM0");
+    BusCfg b = a;
+    std::snprintf(b.name, sizeof(b.name), "%s", "axis2");
+    lock_key(a, k1, sizeof(k1));
+    lock_key(b, k2, sizeof(k2));
+    std::printf("  slcan 同通道: '%s' vs '%s'\n", k1, k2);
+    JR_CHECK(std::strcmp(k1, k2) == 0);
+    JR_CHECK(std::strstr(k1, "slcan") != nullptr);
+    JR_CHECK(std::strstr(k1, "ttyACM0") != nullptr);
+
+    /* 拿着同一个键取两次锁：第二个必须拿到 kLocked，且消息里能看到通道 */
+    BusLock la;
+    BusLock lb;
+    char ma[320] = {};
+    char mb[320] = {};
+    JR_CHECK(la.acquire(k1, ".", false, ma, sizeof(ma)) == Status::kOk);
+    const Status sb = lb.acquire(k2, ".", false, mb, sizeof(mb));
+    std::printf("  第二条（同通道）取锁: %s | %s\n", to_string(sb), mb);
+    JR_CHECK(sb == Status::kLocked);
+    JR_CHECK_CONTAINS(mb, "ttyACM0");   /* 报的是**通道**，不是名字（客户要靠它定位） */
+    la.release();
+
+    /* ② 不同通道 ⇒ 不同键（不误伤正常的双总线系统） */
+    BusCfg c = a;
+    std::snprintf(c.channel, sizeof(c.channel), "%s", "/dev/ttyACM1");
+    lock_key(c, k2, sizeof(k2));
+    JR_CHECK(std::strcmp(k1, k2) != 0);
+
+    /* ③ virtual：名字不同、`spec:` 相同 ⇒ 键必须不同（否则 humanoid_2bus 演示起不来） */
+    BusCfg v1 = default_bus_cfg();
+    std::snprintf(v1.name, sizeof(v1.name), "%s", "leg_left");
+    v1.hal = HalKind::kVirtual;
+    std::snprintf(v1.channel, sizeof(v1.channel), "%s", "0:id=1;1:id=2");
+    BusCfg v2 = v1;
+    std::snprintf(v2.name, sizeof(v2.name), "%s", "leg_right");
+    lock_key(v1, k1, sizeof(k1));
+    lock_key(v2, k2, sizeof(k2));
+    std::printf("  virtual 同 spec: '%s' vs '%s'\n", k1, k2);
+    JR_CHECK(std::strcmp(k1, k2) != 0);
+
+    BusLock lv1;
+    BusLock lv2;
+    char mv1[320] = {};
+    char mv2[320] = {};
+    JR_CHECK(lv1.acquire(k1, ".", false, mv1, sizeof(mv1)) == Status::kOk);
+    JR_CHECK_MSG(lv2.acquire(k2, ".", false, mv2, sizeof(mv2)) == Status::kOk,
+                 "两条 virtual 总线必须能各自取锁（示例依赖这一点）");
+    lv1.release();
+    lv2.release();
+}
+
 }  // namespace
 
 int main()
@@ -873,5 +943,6 @@ int main()
     test_over_planning_rejected();
     test_lock_excludes_second_owner();
     test_feedback_age_is_honest();
+    test_lock_key_follows_channel();
     return jrtest::report();
 }
