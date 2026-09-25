@@ -211,7 +211,8 @@ struct JrBusServices {
      * ==================================================================== */
 
     rt::TickGroup *tg() const noexcept { return node->tg_.get(); }
-    rt::BusRuntime &bus() const noexcept { return tg()->bus(node->bus_index_); }
+    /* `tg()->bus(i)` 收的是 **tick 组内**下标；`cfg_.buses[]` 收的是配置级下标（F12）。 */
+    rt::BusRuntime &bus() const noexcept { return tg()->bus(node->bus_in_group_); }
     const Config &cfg() const noexcept { return node->cfg_; }
     const BusCfg &bus_cfg() const noexcept { return node->cfg_.buses[node->bus_index_]; }
 
@@ -302,7 +303,7 @@ struct JrBusServices {
             return false;
         }
         for (unsigned j = 0u; j < bus_cfg().joint_count; ++j) {
-            if (g->bus(node->bus_index_).joint_enabled(j)) was_enabled->push_back(j);
+            if (g->bus(node->bus_in_group_).joint_enabled(j)) was_enabled->push_back(j);
         }
         Result r;
         if (g->pause(&r, 5000u) != Status::kOk) {
@@ -328,7 +329,7 @@ struct JrBusServices {
             }
             if (!restore.empty()) {
                 Result r;
-                const Status st = g->bus(node->bus_index_)
+                const Status st = g->bus(node->bus_in_group_)
                                       .set_enabled(restore.data(), static_cast<unsigned>(restore.size()),
                                                    true, cfg().safety.require_calibrated, &r);
                 if (st != Status::kOk) {
@@ -1276,7 +1277,7 @@ void JrBusServices::on_get_bus_stats(const jr_interfaces::srv::GetBusStats::Requ
         return;
     }
     const StateSnapshot *s = tg()->acquire_snapshot();
-    if (s == nullptr || node->bus_index_ >= s->bus_count) {
+    if (s == nullptr || node->bus_in_group_ >= s->bus_count) {   /* 快照下标是组内（F12） */
         resp->success = false;
         resp->message = "no snapshot yet (the tick has not produced one)";
         return;

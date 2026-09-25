@@ -142,7 +142,21 @@ private:
     ConfigNotes notes_ = {};
     bool cfg_loaded_ = false;
 
+    /** 本节点负责的总线在 `cfg_.buses[]` 里的**配置级**索引（`cfg_.buses[...]` 用它）。 */
     unsigned bus_index_ = 0u;
+    /** ⚠ 本总线在**它自己的 tick 组里**的位置（F12）。
+     *
+     *  快照 `StateSnapshot::buses[]` 是由 `TickGroup::fill_snapshot()` 按**组内**下标填的，
+     *  快照里 `JointStatePOD::bus_index`、`tg_->bus(i)` 也都是**组内**下标 ——
+     *  而 `bus_index_` 是**配置级**下标。两者只有在"进程里恰好跑着整份配置的第一条总线"时才相等。
+     *
+     *  真机症状（`humanoid_2bus` 示例）：`leg_right` 配置索引=1、组内只有 1 条总线(0)
+     *  ⇒ `1 >= buses_count(1)` ⇒ `GetBusStats` 永远回 "no snapshot yet"；关节过滤
+     *  `j.bus_index != bus_index_` 也全不匹配 ⇒ 该节点的 `/joint_feedback`、`/joint_states`、
+     *  诊断、动关节服务**全废**（左侧恰好两个下标都是 0，所以一直看着是好的）。
+     *  用法纪律：碰 `cfg_.buses[]` → 用 `bus_index_`；碰快照/`tg_->bus()`/比较 POD 的 `bus_index`
+     *  → 用 `bus_in_group_`。 */
+    unsigned bus_in_group_ = 0u;
     unsigned group_index_ = 0u;
     unsigned local_joint_count_ = 0u;
     std::vector<std::string> joint_names_;    /**< 本总线关节名（按总线内序号） */

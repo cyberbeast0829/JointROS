@@ -120,6 +120,7 @@ bool JrBusNode::load_and_validate(std::string *err)
         for (unsigned b = 0u; b < cfg_.groups[g].bus_count; ++b) {
             if (cfg_.groups[g].bus_index[b] == bus_index_) {
                 group_index_ = g;
+                bus_in_group_ = b;   /* ⚠ 快照/tg_->bus()/POD 比较都用**组内**下标（F12） */
                 found_group = true;
                 break;
             }
@@ -716,7 +717,9 @@ void JrBusNode::publish_feedback()
     out.joints.reserve(local_joint_count_);
     for (unsigned i = 0u; i < snap->joint_count; ++i) {
         const JointStatePOD &j = snap->joints[i];
-        if (j.bus_index != bus_index_) continue;
+        /* ⚠ 快照里的 `bus_index` 是**组内**下标（`fill_snapshot` 按组内下标填的），
+           拿配置级 `bus_index_` 比会把本总线的关节全过滤掉（F12）。 */
+        if (j.bus_index != bus_in_group_) continue;
         jr_interfaces::msg::JointFeedback f;
         f.header = out.header;
         f.name = j.name;
@@ -758,7 +761,7 @@ void JrBusNode::publish_joint_states()
     out.effort.reserve(local_joint_count_);
     for (unsigned i = 0u; i < snap->joint_count; ++i) {
         const JointStatePOD &j = snap->joints[i];
-        if (j.bus_index != bus_index_) continue;
+        if (j.bus_index != bus_in_group_) continue;   /* 组内下标，同 publish_joint_feedback（F12） */
         out.name.emplace_back(j.name);
         out.position.push_back(j.position);
         out.velocity.push_back(j.velocity);
@@ -769,7 +772,7 @@ void JrBusNode::publish_joint_states()
 
 void JrBusNode::fill_bus_status(const StateSnapshot &snap, jr_interfaces::msg::BusStatus *out) const
 {
-    const BusStatsPOD &b = snap.buses[bus_index_];
+    const BusStatsPOD &b = snap.buses[bus_in_group_];   /* 快照下标是**组内**的（F12） */
     out->bus = b.name;
     out->link_up = b.link_up;
     out->nodes_online = b.nodes_online;
@@ -809,7 +812,7 @@ void JrBusNode::publish_bus_status()
 {
     if (tg_ == nullptr || pub_bus_status_ == nullptr) return;
     const StateSnapshot *snap = tg_->acquire_snapshot();
-    if (snap == nullptr || bus_index_ >= snap->bus_count) return;
+    if (snap == nullptr || bus_in_group_ >= snap->bus_count) return;   /* 组内下标（F12） */
     jr_interfaces::msg::BusStatus out;
     fill_bus_status(*snap, &out);
     pub_bus_status_->publish(out);
@@ -899,11 +902,11 @@ void JrBusNode::drain_and_publish_faults()
                     ev[i].event == jr_interfaces::msg::JointFault::APPEARED ? "APPEARED" : "CLEARED",
                     out.name.c_str(), ev[i].text, ev[i].err_code, ev[i].hb_error, ev[i].axis_error);
     }
-    if (tg_->bus(bus_index_).faults_dropped() != 0u) {
+    if (tg_->bus(bus_in_group_).faults_dropped() != 0u) {   /* tg_->bus(i) 收的是组内下标（F12） */
         RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
                              "%llu fault event(s) were dropped (ring full): increase the drain rate "
                              "or fix the underlying fault storm",
-                             static_cast<unsigned long long>(tg_->bus(bus_index_).faults_dropped()));
+                             static_cast<unsigned long long>(tg_->bus(bus_in_group_).faults_dropped()));
     }
 }
 
@@ -944,12 +947,12 @@ void JrBusNode::destroy_diagnostics() { diags_.clear(); }
 void JrBusNode::diag_bus(diagnostic_updater::DiagnosticStatusWrapper &stat)
 {
     const StateSnapshot *s = (tg_ != nullptr) ? tg_->acquire_snapshot() : nullptr;
-    if (s == nullptr || bus_index_ >= s->bus_count) {
+    if (s == nullptr || bus_in_group_ >= s->bus_count) {   /* 快照下标是组内（F12） */
         stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "no snapshot yet");
         return;
     }
-    const BusStatsPOD &b = s->buses[bus_index_];
-    const BusCfg &bc = cfg_.buses[bus_index_];
+    const BusStatsPOD &b = s->buses[bus_in_group_];
+    const BusCfg &bc = cfg_.buses[bus_index_];   /* 配置用配置级下标 */
 
     char flags[192] = {};
     rt::bus_flags_text(b.hal_bus_flags, flags, sizeof(flags));
@@ -970,12 +973,12 @@ void JrBusNode::diag_bus(diagnostic_updater::DiagnosticStatusWrapper &stat)
     stat.add("command_overwrites", s->rt.command_overwrites);
     stat.add("rt_throttled", s->rt.rt_throttled ? 1 : 0);
     stat.add("rt_sched_ok", s->rt.rt_sched_ok ? 1 : 0);
-    stat.add("descriptor_complete", tg_->bus(bus_index_).report().desc.complete ? 1 : 0);
-    stat.add("descriptor_from_cache", tg_->bus(bus_index_).report().desc.from_cache ? 1 : 0);
-    stat.add("descriptor_endpoints", tg_->bus(bus_index_).report().desc.parsed_total);
-    stat.add("lock_held", tg_->bus(bus_index_).lock().held() ? 1 : 0);
-    stat.add("lock_owner_pid", tg_->bus(bus_index_).lock().owner_pid_on_disk());
-    stat.add("lock_path", tg_->bus(bus_index_).lock().path());
+    stat.add("descriptor_complete", tg_->bus(bus_in_group_).report().desc.complete ? 1 : 0);
+    stat.add("descriptor_from_cache", tg_->bus(bus_in_group_).report().desc.from_cache ? 1 : 0);
+    stat.add("descriptor_endpoints", tg_->bus(bus_in_group_).report().desc.parsed_total);
+    stat.add("lock_held", tg_->bus(bus_in_group_).lock().held() ? 1 : 0);
+    stat.add("lock_owner_pid", tg_->bus(bus_in_group_).lock().owner_pid_on_disk());
+    stat.add("lock_path", tg_->bus(bus_in_group_).lock().path());
     stat.add("degraded", b.degraded ? 1 : 0);
     stat.add("note", std::string(b.last_note));
 
@@ -998,7 +1001,7 @@ void JrBusNode::diag_bus(diagnostic_updater::DiagnosticStatusWrapper &stat)
     } else if (s->rt.missed_ticks != 0u) {
         stat.summaryf(diagnostic_msgs::msg::DiagnosticStatus::WARN, "%llu tick(s) missed",
                       static_cast<unsigned long long>(s->rt.missed_ticks));
-    } else if (!tg_->bus(bus_index_).report().desc.complete) {
+    } else if (!tg_->bus(bus_in_group_).report().desc.complete) {
         stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN,
                      "descriptor is incomplete: the endpoint table may be partial");
     } else if (b.degraded) {
@@ -1017,7 +1020,10 @@ void JrBusNode::diag_joint(unsigned local_index, diagnostic_updater::DiagnosticS
         stat.summary(diagnostic_msgs::msg::DiagnosticStatus::WARN, "no snapshot yet");
         return;
     }
-    /* 全局索引 = 总线基址 + 总线内序号（快照按全局索引排布）。 */
+    /* 全局索引 = 总线基址 + 总线内序号（快照的 `joints[]` 按**配置级**全局索引排布：
+       `TickGroup` 填快照时传的 `joint_base_[i] = bus_joint_base(cfg, bi)`）。
+       ⚠ 注意与**总线**下标的区别：`snap.buses[]` 是**组内**下标（F12），
+       两者不同域——改这里时别一起“顺手统一”。 */
     const unsigned global = bus_joint_base(cfg_, bus_index_) + local_index;
     if (global >= s->joint_count) {
         stat.summary(diagnostic_msgs::msg::DiagnosticStatus::ERROR, "joint is missing from the snapshot");
@@ -1028,7 +1034,7 @@ void JrBusNode::diag_joint(unsigned local_index, diagnostic_updater::DiagnosticS
     char hb[192] = {};
     rt::joint_status_flags_text(j.status_flags, hb, sizeof(hb));
     char fault[192] = {};
-    const bool has_fault = tg_->bus(bus_index_).joint_fault_text(local_index, fault, sizeof(fault));
+    const bool has_fault = tg_->bus(bus_in_group_).joint_fault_text(local_index, fault, sizeof(fault));
 
     stat.add("online", j.online ? 1 : 0);
     stat.add("enabled", j.enabled ? 1 : 0);
@@ -1056,7 +1062,7 @@ void JrBusNode::diag_joint(unsigned local_index, diagnostic_updater::DiagnosticS
     stat.add("tx_rejected", j.tx_rejected);
     stat.add("feedback_fresh", j.valid_fresh ? 1 : 0);
     /* 看门狗状态：三态（关闭 / 已武装 / 未校验）—— 这是现场最容易误判的一项。 */
-    const std::uint32_t bt = tg_->bus(bus_index_).report().joint[local_index].break_timeout_ms;
+    const std::uint32_t bt = tg_->bus(bus_in_group_).report().joint[local_index].break_timeout_ms;
     const bool armed_cfg = cfg_.buses[bus_index_].arm_device_watchdog;
     const char *wd = "disabled (device break_timeout = 0)";
     if (bt != 0u) {
