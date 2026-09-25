@@ -77,8 +77,13 @@ wait_for() {  # wait_for <bounded_ms> <command...>：轮询到命令成功
 write_cfg "${CFG}" false
 write_cfg "${CFG_SHARED}" true
 
-LOCK_FILE="${LOCKDIR}/jr-vbus.lock"
-LOCK_OWNER="${LOCKDIR}/jr-vbus.owner"
+# 锁文件名 = `jr-<锁键>.lock`，锁键由 `lock_key()` 决定（F7）：真后端按**物理通道**
+# （`slcan:/dev/ttyACM0`），`virtual` 按**总线名**（每条 virtual 总线各有自己的仿真设备，
+# 同 spec 也互不干扰 —— 所以不能按通道互斥，否则人形示例/CI 全卡死）。
+# 这里是 `type: virtual` + `name: vbus` ⇒ 键是 `virtual:vbus`，`BusLock` 把 `:` 清洗成 `_`。
+# ⚠ 故意把名字**写死**：这条用例就是锁键契约的守卫，键规则一改这里必须跟着改（可见、可审）。
+LOCK_FILE="${LOCKDIR}/jr-virtual_vbus.lock"
+LOCK_OWNER="${LOCKDIR}/jr-virtual_vbus.owner"
 RELEASE="${WORK}/release"
 
 # ---- ① 第一个进程：configure 成功并**一直持锁** --------------------------------
