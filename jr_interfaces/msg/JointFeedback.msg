@@ -25,8 +25,14 @@ uint32 age_ms                   # 距上次**有效**反馈的时间。
                                 #   不陈旧 → SDK 的设备侧采样年龄；陈旧且有历史 → 真实经过时间；
                                 #   陈旧且从未新鲜过 → 0xFFFFFFFF（kFeedbackAgeUnknown“未知”）。
                                 #   所以：判“值能不能用”请看 feedback_stale/status_flags，年龄只是辅助。
+                                # ⚠ 若 status_flags 置了 0x80000000（端点轮询），则本字段描述的是
+                                #   **那次轮询**的年龄（不是上报帧的年龄）。
 
-uint32 status_flags             # SDK JSDK_JF_* 位（原始位；含 FEEDBACK_STALE / WATCHDOG_* / TARGET_REJECTED）
+uint32 status_flags             # SDK JSDK_JF_* 位（原始位；含 FEEDBACK_STALE / WATCHDOG_* / TARGET_REJECTED）。
+                                # ⚠ 最高位 0x80000000 = **我们自己加的位**（不是 SDK 位）：
+                                #   position/velocity 来自**端点轮询**（`jr.feedback.endpoint_poll_ms`，
+                                #   关着时为 0）。它与 FEEDBACK_STALE **不矛盾**：帧可以是陈旧的，
+                                #   而这两个值是我们刚刚直接读回来的真值。
 uint16 mode_state               # 固件原始 nibble（0..7），排障用
 uint8 error_code                # MIT 4-bit 摘要（**别当结论**）
 uint8 heartbeat_error           # 心跳 5-bit 子系统位图（原始位）

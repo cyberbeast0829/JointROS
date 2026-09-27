@@ -1784,6 +1784,54 @@ std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns,
                : static_cast<std::uint32_t>(ms);
 }
 
+std::uint64_t BusRuntime::polled_max_age_ns(unsigned poll_ms) noexcept
+{
+    /* 3 个周期 + 50 ms：容忍一次调度抖动或被服务窗口挤掉一次，
+       但**不**允许无限期沿用 —— 宁可不给，也不给一个不新鲜的值。 */
+    return static_cast<std::uint64_t>(poll_ms) * 3ull * 1000000ull + 50000000ull;
+}
+
+bool BusRuntime::polled_usable(std::uint64_t now_ns, std::uint64_t stamp_ns, unsigned poll_ms,
+                               bool valid) noexcept
+{
+    if (!valid) return false;              /* 本轮没读成 */
+    if (poll_ms == 0u) return false;       /* 功能关闭 */
+    if (stamp_ns == 0u) return false;      /* 从未写过 */
+    if (now_ns < stamp_ns) return false;   /* 时间倒退（不该发生）⇒ 宁不可用 */
+    return (now_ns - stamp_ns) <= polled_max_age_ns(poll_ms);
+}
+
+void BusRuntime::set_polled_pos_vel(unsigned joint_index, double pos, double vel) noexcept
+{
+    if (joint_index >= kMaxJointsPerBus) return;
+    PolledPV &p = polled_[joint_index];
+    const std::uint64_t stamp_ns = now_ns();   /* 用本类的时钟，见头文件注释 */
+    p.seq.fetch_add(1u, std::memory_order_acq_rel);   /* 变奇：读者会放弃这次 */
+    p.pos = pos;
+    p.vel = vel;
+    p.stamp_ns = stamp_ns;
+    p.valid.store(1u, std::memory_order_release);
+    p.seq.fetch_add(1u, std::memory_order_acq_rel);   /* 变偶：写完 */
+}
+
+void BusRuntime::clear_polled(unsigned joint_index) noexcept
+{
+    if (joint_index >= kMaxJointsPerBus) return;
+    PolledPV &p = polled_[joint_index];
+    p.seq.fetch_add(1u, std::memory_order_acq_rel);
+    p.pos = 0.0;
+    p.vel = 0.0;
+    p.stamp_ns = 0u;
+    p.valid.store(0u, std::memory_order_release);
+    p.seq.fetch_add(1u, std::memory_order_acq_rel);
+}
+
+bool BusRuntime::has_polled(unsigned joint_index) const noexcept
+{
+    if (joint_index >= kMaxJointsPerBus) return false;
+    return polled_[joint_index].valid.load(std::memory_order_acquire) != 0u;
+}
+
 void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept
 {
     const std::uint64_t now = now_ns();
@@ -1856,6 +1904,29 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
             o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], true, 0u);
             o.valid_fresh = false;
             o.feedback_stale = true;
+        }
+        /* F11：轮询拿到的新鲜真值 ⇒ 覆盖上报帧里的位置/速度（其余字段仍来自帧）。
+           ⚠ 两件事不要混：`feedback_stale` 描述的是**上报帧**这件事，不改；
+           另置 `kStatusFromEndpointPoll` 告诉上层“这两个值来自端点轮询”。 */
+        {
+            const PolledPV &p = polled_[j];
+            const std::uint32_t s1 = p.seq.load(std::memory_order_acquire);
+            const bool valid = p.valid.load(std::memory_order_acquire) != 0u;
+            const double pp = p.pos;
+            const double vv = p.vel;
+            const std::uint64_t stamp = p.stamp_ns;
+            const std::uint32_t s2 = p.seq.load(std::memory_order_acquire);
+            /* seqlock 读：只有前后一致且序号为偶数才可信（否则退回上报帧）。 */
+            if (s1 == s2 && (s1 & 1u) == 0u &&
+                polled_usable(now, stamp, bus_.feedback_poll_ms, valid)) {
+                o.position = pp;
+                o.velocity = vv;
+                o.status_flags |= kStatusFromEndpointPoll;
+                const std::uint64_t age = (now - stamp) / 1000000ull;
+                o.age_ms = (age >= static_cast<std::uint64_t>(kFeedbackAgeStaleCap))
+                               ? kFeedbackAgeStaleCap
+                               : static_cast<std::uint32_t>(age);
+            }
         }
         o.enabled = (jsdk_joint_is_enabled(joints_[j]) != 0);
         o.calibrated = report_.joint[j].calibrated;

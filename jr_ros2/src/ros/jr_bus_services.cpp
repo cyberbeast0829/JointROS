@@ -165,6 +165,15 @@ void log_result(rclcpp_lifecycle::LifecycleNode *n, const char *what, const Resu
  * 服务层实现
  * ======================================================================== */
 
+namespace {
+
+/* F11：轮询用的端点路径。**不猜** —— 开轮询前先用 `lookup_endpoint()` 确认它们
+   真在描述符里且可读（不在就老实不开，见 `create()`）。 */
+constexpr const char *kPollPathPos = "axis0.encoder.pos_estimate";
+constexpr const char *kPollPathVel = "axis0.encoder.vel_estimate";
+
+}  // namespace
+
 struct JrBusServices {
     explicit JrBusServices(JrBusNode *n) : node(n) {}
 
@@ -189,6 +198,19 @@ struct JrBusServices {
     rclcpp::Service<jr_interfaces::srv::ExportDescriptor>::SharedPtr export_descriptor;
     rclcpp::Service<jr_interfaces::srv::ImportDescriptor>::SharedPtr import_descriptor;
     rclcpp::Service<jr_interfaces::srv::PublishHeartbeatHint>::SharedPtr heartbeat_hint;
+
+    /* ---------------- F11：端点轮询（可选反馈源） ---------------- */
+    rclcpp::TimerBase::SharedPtr tmr_poll_;
+    bool          poll_paths_ok_ = false;   /**< 端点存在且可读？不存在就**不开**轮询 */
+    std::uint64_t poll_log_ns_ = 0u;        /**< 轮询状态日志的限流时间戳 */
+    std::uint64_t poll_last_ns_ = 0u;       /**< 上次成功轮询的时间（诊断用） */
+    std::uint64_t poll_count_ = 0u;         /**< 成功轮询次数 */
+    std::uint64_t poll_fail_ = 0u;          /**< 读失败次数（每次失败都让对应关节的轮询值失效） */
+    std::uint64_t poll_win_us_ = 0u;        /**< 上一次暂停窗口的**实测**耗时（µs） */
+    std::uint64_t poll_win_max_us_ = 0u;    /**< 历史最大窗口耗时（µs） */
+
+    /** F11：轮询端点 `pos_estimate`/`vel_estimate`，把真值交给 `BusRuntime`。 */
+    void poll_feedback();
 
     /* ---------------- 生命周期 ---------------- */
 
@@ -491,10 +513,129 @@ void JrBusServices::create()
         bind_srv<S::PublishHeartbeatHint>(&JrBusServices::on_heartbeat_hint), cbg);
 
     RCLCPP_INFO(node->get_logger(), "services up (19): motion/lifecycle + params/descriptor/diagnostics");
+
+    /* ======================================================================
+     * F11：端点轮询（可选反馈源）
+     * ----------------------------------------------------------------------
+     *  先确认端点真的在描述符里，再开定时器 —— 路径猜错就变成一个
+     *  每 100 ms 报一次错的噪声源。对不上的时候宁可不开，并说清楚为什么。
+     * ==================================================================== */
+    const unsigned poll_ms = bus_cfg().feedback_poll_ms;
+    if (poll_ms > 0u) {
+        EndpointInfo ep_pos;
+        EndpointInfo ep_vel;
+        Result r1;
+        Result r2;
+        const Status s1 = bus().lookup_endpoint(kPollPathPos, &ep_pos, &r1);
+        const Status s2 = bus().lookup_endpoint(kPollPathVel, &ep_vel, &r2);
+        if (s1 == Status::kOk && s2 == Status::kOk && ep_pos.readable() &&
+            ep_vel.readable()) {
+            poll_paths_ok_ = true;
+            tmr_poll_ = node->create_wall_timer(
+                std::chrono::milliseconds(poll_ms), [this]() { poll_feedback(); }, cbg);
+            RCLCPP_INFO(node->get_logger(),
+                        "endpoint polling: %u ms on '%s'/'%s' (only while every joint on this bus is "
+                        "disabled; the safe pause window would disable them otherwise)",
+                        poll_ms, kPollPathPos, kPollPathVel);
+        } else {
+            poll_paths_ok_ = false;
+            RCLCPP_WARN(node->get_logger(),
+                        "endpoint polling is configured (%u ms) but this device does not expose a "
+                        "readable '%s'/'%s' (pos: %s; vel: %s) — polling stays OFF",
+                        poll_ms, kPollPathPos, kPollPathVel, r1.message, r2.message);
+        }
+    }
+}
+
+void JrBusServices::poll_feedback()
+{
+    const unsigned poll_ms = bus_cfg().feedback_poll_ms;
+    if (poll_ms == 0u || !poll_paths_ok_) return;
+
+    /* ⚠ 关节在动时**不轮询**：`read_params` 要进安全暂停窗口，而
+       `TickGroup::pause()` 的语义是「**先安全失能**再交出所有权」（见 rt/jr_ops.hpp）。
+       拿它做 10 Hz 轮询 = 每秒失能/使能十次 —— 那不是"读一个数"，那是折腾设备。
+       宁可不给轮询值，也不去动一个正在动的关节。 */
+    const unsigned jc = bus_cfg().joint_count;
+    for (unsigned j = 0u; j < jc; ++j) {
+        if (bus().joint_enabled(j)) {
+            RCLCPP_INFO_ONCE(node->get_logger(),
+                             "endpoint polling: idle while joints are enabled (the safe pause window "
+                             "disables them first). It resumes once every joint is disabled.");
+            return;
+        }
+    }
+
+    /* 与参数服务**共用**同一个 callback group ⇒ 轮询窗口不会和参数服务嵌套。 */
+    Guard g;
+    std::string err;
+    const auto w0 = std::chrono::steady_clock::now();
+    if (!open_window(&g, {}, true, &err)) {
+        RCLCPP_WARN_ONCE(node->get_logger(),
+                         "endpoint polling: cannot enter the safe pause window (%s) — "
+                         "keeping the values from the device broadcast frame",
+                         err.c_str());
+        return;
+    }
+
+    ParamReadItem items[2u * kMaxJointsPerBus];
+    unsigned n = 0u;
+    for (unsigned j = 0u; j < jc; ++j) {
+        items[n].joint_index = j;
+        items[n].path = kPollPathPos;
+        ++n;
+        items[n].joint_index = j;
+        items[n].path = kPollPathVel;
+        ++n;
+    }
+
+    rt::BusRuntime &b = bus();
+    Result r;
+    const Status st = b.read_params(items, n, &r);
+    /* 实测窗口耗时："暂停 tick 去读一个数"到底多贵 —— 不要猜，要量。 */
+    poll_win_us_ = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - w0)
+            .count());
+    if (poll_win_us_ > poll_win_max_us_) poll_win_max_us_ = poll_win_us_;
+
+    if (st != Status::kOk) {
+        /* 读不成 ⇒ 立刻让全部轮询值失效：退回设备上报帧，而不是继续用上一次的值。 */
+        for (unsigned j = 0u; j < jc; ++j) b.clear_polled(j);
+        ++poll_fail_;
+        RCLCPP_WARN_ONCE(node->get_logger(), "endpoint polling: read_params failed (%s)",
+                         r.message);
+        return;
+    }
+
+    for (unsigned j = 0u; j < jc; ++j) {
+        const ParamReadItem &ip = items[2u * j];
+        const ParamReadItem &iv = items[2u * j + 1u];
+        if (ip.status == Status::kOk && iv.status == Status::kOk) {
+            b.set_polled_pos_vel(j, ip.value.as_double(), iv.value.as_double());
+        } else {
+            b.clear_polled(j);
+            ++poll_fail_;
+        }
+    }
+    poll_last_ns_ = static_cast<std::uint64_t>(node->now().nanoseconds());
+    ++poll_count_;
+    /* 每 10 s 报一次（说清楚它到底在干什么、代价多少，而不是让用户去猜）。 */
+    if (poll_last_ns_ - poll_log_ns_ > 10000000000ull) {
+        poll_log_ns_ = poll_last_ns_;
+        RCLCPP_INFO(node->get_logger(),
+                    "endpoint polling: %llu ok / %llu failed (period %u ms; pause window last %llu us, "
+                    "max %llu us)",
+                    static_cast<unsigned long long>(poll_count_),
+                    static_cast<unsigned long long>(poll_fail_), poll_ms,
+                    static_cast<unsigned long long>(poll_win_us_),
+                    static_cast<unsigned long long>(poll_win_max_us_));
+    }
 }
 
 void JrBusServices::destroy()
 {
+    tmr_poll_.reset();
+    poll_paths_ok_ = false;
     set_enabled.reset();
     calibrate.reset();
     home.reset();

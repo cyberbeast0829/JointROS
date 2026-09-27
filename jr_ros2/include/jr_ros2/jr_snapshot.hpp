@@ -24,7 +24,11 @@ struct JointStatePOD {
     std::uint8_t  err_code = 0u;        /**< MIT 4-bit 摘要 */
     std::uint8_t  hb_error = 0u;        /**< 心跳 5-bit 子系统位图（原始位，优于摘要） */
     std::uint16_t mode_state = 0u;      /**< 固件原始 nibble */
-    std::uint16_t status_flags = 0u;    /**< SDK JSDK_JF_* */
+    /** SDK `JSDK_JF_*` 位 + 我们自己的高位（见 `BusRuntime::kStatusFromEndpointPoll`）。
+     *  ⚠ 这里以前是 `uint16_t`，而 SDK 字段与 `JointFeedback.status_flags` 都是 **32 位** ——
+     *  镜像成 16 位会**静默丢掉** 0x8000 以上的位（今天 SDK 用的位都在低 16 位，所以
+     *  没症状；我们要用的 0x80000000 会直接被截成 0，编译器在 `|=` 时抓到了）。 */
+    std::uint32_t status_flags = 0u;
     std::uint32_t axis_error = 0u;      /**< 32-bit 子系统错误位（0 = 未查询或无错） */
     std::uint32_t age_ms = 0u;          /**< 距上次有效反馈 */
     std::uint32_t tx_rejected = 0u;     /**< 累计被拒绝的越界指令数（**设备**侧计数） */

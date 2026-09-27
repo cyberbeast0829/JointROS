@@ -511,7 +511,8 @@ bool read_feedback(Loader &L, const YAML::Node &jr, Config &c)
     const YAML::Node n = jr["feedback"];
     if (!n) return true;
     if (!keys_ok(L, n, "feedback",
-                 {"source", "heartbeat_ms", "poll_period_ms", "publish_hz", "joint_state_hz"})) {
+                 {"source", "heartbeat_ms", "poll_period_ms", "publish_hz", "joint_state_hz",
+                  "endpoint_poll_ms"})) {
         return false;
     }
 
@@ -559,6 +560,23 @@ bool read_feedback(Loader &L, const YAML::Node &jr, Config &c)
             return L.fail("feedback.joint_state_hz: must be in 1..5000 (got " +
                           std::to_string(L.node.joint_state_hz) + ")");
         }
+    }
+
+    /* F11：端点轮询。0 = 关闭（默认）。范围检查同 publish_hz：
+       太小的周期会把总线塞满（读参数要独占总线），太大就盖不住陈旧帧。 */
+    if (n["endpoint_poll_ms"]) {
+        L.node_key("feedback.endpoint_poll_ms");
+        if (!need_u32(L, n, "feedback", "endpoint_poll_ms", L.node.endpoint_poll_ms)) return false;
+        if (L.node.endpoint_poll_ms > 0u && L.node.endpoint_poll_ms < 10u) {
+            return L.fail("feedback.endpoint_poll_ms: must be 0 (off) or in 10..5000 (got " +
+                          std::to_string(L.node.endpoint_poll_ms) + ")");
+        }
+        if (L.node.endpoint_poll_ms > 5000u) {
+            return L.fail("feedback.endpoint_poll_ms: must be 0 (off) or in 10..5000 (got " +
+                          std::to_string(L.node.endpoint_poll_ms) + ")");
+        }
+        /* 下发给每条总线（总线级字段，便于将来按总线覆盖）。 */
+        for (unsigned b = 0u; b < c.bus_count; ++b) c.buses[b].feedback_poll_ms = L.node.endpoint_poll_ms;
     }
     return true;
 }

@@ -405,6 +405,10 @@ jr:
 
   # ── 反馈与发布率 ─────────────────────────────────────────────
   feedback:
+    endpoint_poll_ms: 0    # F11：端点轮询（0 = 关，默认）。>0 时在**本条总线所有关节都失能**时
+                          #   按周期读 pos_estimate/vel_estimate，用它覆盖话题里的位置/速度，
+                          #   并置 status_flags 的 0x80000000 表示来源。关节一动它自动停
+                          #   （读参数要暂停 tick，而暂停会先安全失能）。建议 1000；100 ms 实测不可用
     source: broadcast_heartbeat  # broadcast_heartbeat | heartbeat_only | unicast_poll | unicast_only
     heartbeat_ms: 5              # 期望的设备心跳周期
     poll_period_ms: 10           # SDK 轮询周期（只在上面选 unicast_* 时有用）
@@ -751,6 +755,8 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 - 急停可以**锁存**；生产上请把"清锁存"写进你的操作规程（`fault-reset` → 必要时 `reset` / 断电）。
 
 ---
+- **位置/速度的“新鲜度”**：默认仍以设备上报帧为准，而本链路/固件上该帧可能陈旧（`feedback_stale`）。想要真值可开 `jr.feedback.endpoint_poll_ms`（默认关）—— 但它**只在关节都失能时**工作（读参数要暂停 tick，而暂停会先安全失能），并且 100 ms 档实测会让 tick 大量丢拍；建议 1000 ms 起。
+- **`calib` / `home`** 仍无真机正例（会动关节，等确认）；`estop` 锁存后 `fault-reset` 清不掉，只有软复位/断电重启（§9.3）。
 
 ## 11. 目录、文档、版本、许可
 

@@ -276,7 +276,11 @@ struct BusCfg {
 
     FeedbackPolicy feedback = FeedbackPolicy::kBroadcastHeartbeat;
     std::uint32_t  heartbeat_ms = 5u;     /**< 建议的设备心跳周期（0 = 不用心跳反馈） */
-    std::uint32_t  poll_period_ms = 10u;  /**< 轮询反馈周期（0 = 不轮询） */
+    std::uint32_t  poll_period_ms = 10u;  /**< ↔ SDK 的 unicast_poll 周期（0 = 不轮询）。
+                                               ⚠ 与 `feedback_poll_ms` **不是**一回事（后者是我们
+                                               自己去读端点），见 `jr_config_yaml.hpp`。 */
+    /** F11：端点轮询周期（ms，0 = 关闭）。由 `jr.feedback.endpoint_poll_ms` 下发到每条总线。 */
+    std::uint32_t  feedback_poll_ms = 0u;
 
     double         max_bus_load = 0.60;   /**< 启动预算检查阈值（超 → 拒绝；0.6~0.8 → 警告） */
 

@@ -33,7 +33,17 @@ namespace jr {
 struct NodeCfg {
     std::uint32_t publish_hz = 500u;      /**< `joint_feedback` 发布率（§6.3 默认 500 Hz） */
     std::uint32_t joint_state_hz = 100u;  /**< `sensor_msgs/JointState` 发布率 */
-};
+    /** F11：**端点轮询**周期（ms；0 = 关闭，默认）。
+     *
+     *  与 `buses[].poll_period_ms` 是**两回事**：那个是 SDK 的 `unicast_poll` 反馈策略
+     *  （真机实测**不刷新**上报帧、只把开销放大 165 倍 ⇒ 已弃用，见 DESIGN §13.3-53）；
+     *  这个是我们自己按周期去**读设备端点** `pos_estimate`/`vel_estimate`，把读回来的真值
+     *  用来覆盖 `/joint_feedback` 里的位置/速度。
+     *
+     *  ⚠ 只在**本条总线上所有关节都失能**时才轮询：读参数要进安全暂停窗口，而
+     *  `TickGroup::pause()` 的语义是**先安全失能**（见 "rt/jr_ops.hpp" 注释）——
+     *  拿它做 10 Hz 轮询会变成每秒失能/使能十次。在动的关节不会因为开了这个键被打断。 */
+    std::uint32_t endpoint_poll_ms = 0u;};
 
 /** 加载结论（比 `Result` 多两项**必须让用户看到**的事实）。 */
 struct YamlLoadReport {

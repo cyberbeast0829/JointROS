@@ -19,6 +19,7 @@
 #ifndef JR_ROS2_RT_JR_BUS_RUNTIME_HPP
 #define JR_ROS2_RT_JR_BUS_RUNTIME_HPP
 
+#include <atomic>
 #include <cstdint>
 #include <vector>
 
@@ -318,6 +319,41 @@ public:
     void request_disable_all() noexcept;
 
     /** 把本总线的状态写进快照（tick 线程序列化，读者只看完整快照）。 */
+    /* ===================== F11：端点轮询得到的"真值" =====================
+     *
+     *  为什么需要：设备主动上报的帧可能**陈旧**（`feedback_stale`），而 "unicast_poll" 这条
+     *  SDK 反馈策略在真机上实测**并不刷新**上报帧（只把开销放大 165 倍，见 DESIGN §13.3-53）。
+     *  能拿到真值的只有一条路：**自己去读端点**（`pos_estimate` / `vel_estimate`）。
+     *
+     *  ⚠ 诚实性三条：
+     *   ① 只覆盖 position/velocity，其余字段仍来自上报帧（温度/错误位等）；
+     *   ② 帧陈旧这个事实**不改**（描述的 是"帧"），另置一个位告诉上层"pos/vel 来自轮询"；
+     *   ③ 轮询值过期就不用 —— 不拿一个更旧的值冒充当前值（`polled_usable()`）。 */
+
+    /** 我们自己置的位（**不是** SDK 位），表示 `position`/`velocity` 来自端点轮询。 */
+    static constexpr std::uint32_t kStatusFromEndpointPoll = 0x80000000u;
+
+    /** 轮询值的最大允许年龄（ns）= `3 × poll_ms + 50 ms`（**纯函数**）。 */
+    static std::uint64_t polled_max_age_ns(unsigned poll_ms) noexcept;
+
+    /** 轮询值能不能用（**纯函数**，单测直接钉住"不许拿旧值冒充当前值"）。 */
+    static bool polled_usable(std::uint64_t now_ns, std::uint64_t stamp_ns, unsigned poll_ms,
+                              bool valid) noexcept;
+
+    /** 写入一次轮询结果（**单写者** = ROS 执行器线程；读在发布路径，走 seqlock）。
+     *
+     *  ⚠ 时间戳**由本类自己打**（`now_ns()`）：调用者用的是 ROS 时间（epoch），
+     *  而 `fill_snapshot` 比的是 `now_ns()`（单调时钟）—— 两者基不同时
+     *  `now < stamp` 恒成立，轮询值会被永远判为"不可用"（实测踩过，
+     *  症状是轮询在跑但状态位一直不置）。所以这里不给调用者传时间的自由。 */
+    void set_polled_pos_vel(unsigned joint_index, double pos, double vel) noexcept;
+
+    /** 本轮没读成 ⇒ 立刻失效（不要让上一次的值继续冒充当前值）。 */
+    void clear_polled(unsigned joint_index) noexcept;
+
+    /** 该关节当前有没有可用的轮询值（诊断/日志用）。 */
+    bool has_polled(unsigned joint_index) const noexcept;
+
     void fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept;
 
     /**
@@ -457,6 +493,17 @@ private:
     /** 最近一次拿到**非陈旧**反馈的时刻（tick 时钟；0 = 从未拿到过）。
      *  为什么自己记：见 `feedback_age_ms()` 的注释。 */
     std::uint64_t last_fresh_ns_[kMaxJointsPerBus] = {};
+
+    /** F11：端点轮询结果。seqlock：写者把 `seq` 变奇、写字段、再变偶；
+     *  读者发现 `seq` 前后不一致就**不用**这次的值（退回上报帧）。 */
+    struct PolledPV {
+        std::atomic<std::uint32_t> seq{0u};
+        double                     pos = 0.0;
+        double                     vel = 0.0;
+        std::uint64_t              stamp_ns = 0u;
+        std::atomic<std::uint32_t> valid{0u};
+    };
+    PolledPV polled_[kMaxJointsPerBus] = {};
     char        snapshot_note_[160] = {};
 };
 

@@ -930,6 +930,38 @@ void test_lock_key_follows_channel()
     lv2.release();
 }
 
+/* F11：端点轮询值的"可用性"判定。单测要把两条规矩钉死：
+    ① 轮询值过期就**不能**用（否则就是拿一个更旧的值冒充当前值）；
+    ② 没读成/功能关/时间倒退 —— 一律不可用。 */
+static void test_polled_usable_is_honest()
+{
+    using rt::BusRuntime;
+    const unsigned poll_ms = 100u;
+    const std::uint64_t t0 = 1000000000ull; /* 任意基准 */
+
+    /* 新鲜：可用。 */
+    JR_CHECK(BusRuntime::polled_usable(t0 + 50000000ull, t0, poll_ms, true));
+
+    /* 边界：3 × 100 ms + 50 ms = 350 ms（正好可用，多 1 ns 就不行）。 */
+    const std::uint64_t max_age = BusRuntime::polled_max_age_ns(poll_ms);
+    JR_CHECK_EQ(max_age, 350000000ull);
+    JR_CHECK(BusRuntime::polled_usable(t0 + max_age, t0, poll_ms, true));
+    JR_CHECK(!BusRuntime::polled_usable(t0 + max_age + 1ull, t0, poll_ms, true));
+
+    /* 本轮没读成 ⇒ 不可用（哪怕时间戳看着很新）。 */
+    JR_CHECK(!BusRuntime::polled_usable(t0, t0, poll_ms, false));
+
+    /* 功能关闭 / 从未写过 ⇒ 不可用。 */
+    JR_CHECK(!BusRuntime::polled_usable(t0 + 1000000ull, t0, 0u, true));
+    JR_CHECK(!BusRuntime::polled_usable(t0 + 1000000ull, 0u, poll_ms, true));
+
+    /* 时间倒退 ⇒ 不可用（宁可退回上报帧）。 */
+    JR_CHECK(!BusRuntime::polled_usable(t0, t0 + 1000000ull, poll_ms, true));
+
+    /* 状态位必须是我们自己的高位：SDK 现有位都在低 8 位，不能撞。 */
+    JR_CHECK_EQ(static_cast<unsigned>(BusRuntime::kStatusFromEndpointPoll), 0x80000000u);
+}
+
 }  // namespace
 
 int main()
@@ -944,5 +976,6 @@ int main()
     test_lock_excludes_second_owner();
     test_feedback_age_is_honest();
     test_lock_key_follows_channel();
+    test_polled_usable_is_honest();
     return jrtest::report();
 }
