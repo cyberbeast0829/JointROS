@@ -408,7 +408,7 @@ jr:
     endpoint_poll_ms: 0    # F11：端点轮询（0 = 关，默认）。>0 时在**本条总线所有关节都失能**时
                           #   按周期读 pos_estimate/vel_estimate，用它覆盖话题里的位置/速度，
                           #   并置 status_flags 的 0x80000000 表示来源。关节一动它自动停
-                          #   （读参数要暂停 tick，而暂停会先安全失能）。建议 1000；100 ms 实测不可用
+                          #   （读参数要暂停 tick，而暂停会先安全失能）。真机建议 5000（真机上 1000 ms 实测约 4100 丢拍/s）
     source: broadcast_heartbeat  # broadcast_heartbeat | heartbeat_only | unicast_poll | unicast_only
     heartbeat_ms: 5              # 期望的设备心跳周期
     poll_period_ms: 10           # SDK 轮询周期（只在上面选 unicast_* 时有用）
@@ -739,6 +739,7 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 | 实时性不达标（抖动大 / 丢拍多） | 没有 RT 权限，或被内核限流 | 按 §1.2 配 RT；`$J status` 的 `tick_overruns`、`rt_throttled` 是判据 |
 | `calib` / `home` 失败 | 虚拟后端不实现这两个状态机；真机上未标定/有故障时设备也会拒 | 先 `jr_hw_verify` 看标定标志；真机路径见 DESIGN §13.4 的待办 |
 | 节点起不来，日志说 `bus_lock` 被占 | 上一次没退干净（尤其被 `kill -9`） | `pkill -x jr_bus`（**别用 `-f`**）；仍然占着就按报错里的 PID 处理 |
+| 起节点报 `cannot open '/dev/ttyACM0' (slcan): invalid-argument` | 串口被别的进程占着 —— **最常见**是你自己起了 `slcand -o -c -s8 /dev/ttyACM0 slcan0` | 二选一：① 停掉 `slcand`（走裸串口路径）；② 改成 SocketCAN：`type: socketcan` + `interface: slcan0`（同一根物理总线，**不需要 sudo**） |
 
 ---
 
@@ -755,7 +756,7 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 - 急停可以**锁存**；生产上请把"清锁存"写进你的操作规程（`fault-reset` → 必要时 `reset` / 断电）。
 
 ---
-- **位置/速度的“新鲜度”**：默认仍以设备上报帧为准，而本链路/固件上该帧可能陈旧（`feedback_stale`）。想要真值可开 `jr.feedback.endpoint_poll_ms`（默认关）—— 但它**只在关节都失能时**工作（读参数要暂停 tick，而暂停会先安全失能），并且 100 ms 档实测会让 tick 大量丢拍；建议 1000 ms 起。
+- **位置/速度的“新鲜度”**：默认仍以设备上报帧为准，而本链路/固件上该帧可能陈旧（`feedback_stale`）。想要真值可开 `jr.feedback.endpoint_poll_ms`（默认关）—— 但它**只在关节都失能时**工作（读参数要暂停 tick，而暂停会先安全失能），并且**在真机上** 1000 ms 档实测约 4100 丢拍/s（5000 ms 档约 9 丢拍/次，可用）⇒ 真机建议 **5000 ms 起**。另：实测该帧可以**冻在 0.0**（`position/velocity=0/0` 而关节真值非零），这正是要开轮询的理由。
 - **`calib` / `home`** 仍无真机正例（会动关节，等确认）；`estop` 锁存后 `fault-reset` 清不掉，只有软复位/断电重启（§9.3）。
 
 ## 11. 目录、文档、版本、许可
@@ -773,5 +774,5 @@ jr_bringup/                   launch / 配置模板 / URDF 示例 / 演示
 tools/build_dev.sh            无 ROS 的"配置 + 构建 + 测试"一条命令
 ```
 
-- **当前版本**：v0.18（逐版本变更见 DESIGN §14；已验证环境与逐项证据见 §13.2，含真机）。
+- **当前版本**：v0.19（逐版本变更见 DESIGN §14；已验证环境与逐项证据见 §13.2，含真机）。
 - **许可**：**MIT**，见 [`LICENSE`](LICENSE)。
