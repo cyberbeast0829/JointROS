@@ -570,7 +570,7 @@ J="ros2 run jr_ros2 jr_ctl --node axis1"
 | 层 | 命令 | 应该看到 | 需要什么 |
 |---|---|---|---|
 | ① 离线核心（最快） | `tools/build_dev.sh`（或 `ctest --test-dir build`） | `100% tests passed out of 11` | 只有编译器 + CMake（**Windows 也行**） |
-| ② 容器三发行版 | `bash docker/run.sh jazzy\|humble\|lyrical` | 三条全绿（`ctest` / `colcon test` / JTC 端到端） | WSL2 + Docker |
+| ② 容器三发行版 | `bash docker/run.sh jazzy\|humble\|lyrical` | 三条全绿（`ctest` / `colcon test` / JTC 端到端）—— **2026-09-27 实测**：jazzy / humble / lyrical 全部 `RC=0`、`ctest` 13/13、JTC **PASS** | WSL2 + Docker |
 | ③ 真机 | `jr_hw_verify --config ...` → 起节点 → `colcon test --base-paths jr_ros2` | 体检 0 失败；`colcon test` 全过 | 一台 Ubuntu + 真实模组 |
 
 > 具体数字会随版本变（当前版本与逐项证据在 [`docs/DESIGN.zh-CN.md`](docs/DESIGN.zh-CN.md) 的 §13.2 与 §14），
