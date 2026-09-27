@@ -539,7 +539,7 @@ J="ros2 run jr_ros2 jr_ctl --node axis1"
 | 存 Flash | `$J save [--joints a,b] --confirm` | 掉电保留；受 `params.allow_flash_persist` 闸门约束 |
 | 使能 / 失能 | `$J enable|disable [--joints a,b] --confirm` | 失能走 SDK 安全序列 |
 | 点动 | `$J jog --joint <名> --pos <rad> --kp K --kd D --duration-s S --confirm` | 限时 + 自动失能收尾；**不给增益会被拒** |
-| 标定 / 回零 | `$J calib` / `$J home` | 真机上会动关节；虚拟后端不实现这两个状态机 |
+| 标定 / 回零 | `$J calib` / `$J home` | 真机上会动关节（实测 `calib` 通过并读回 `pre_calibrated=true`）；⚠ `home` 需要**限位开关** —— 没有限位的模组会被设备以 `HOMING_WITHOUT_ENDSTOP` 拒绝；虚拟后端两个都不实现 |
 | 置零 | `$J zero [--joints a,b]` | 不落 Flash |
 | 清故障 | `$J fault-reset --confirm` | `STOP_MOTOR → CLEAR_ERRORS`，**不动电机** |
 | 软复位 | `$J reset --confirm` | 复位设备；之后必须重新 `configure` |
@@ -737,7 +737,7 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 | 命令发出去了，关节不动 | ① `kp/kd/tau` 全 0（会被拒）② 没使能 ③ 命令模式与 `joints[].mode` 不符（会被丢弃并计数） | `$J status` 看 `cmd_rejected`；`$J enable --joints ... --confirm`；模式见配置 |
 | 反馈位置/速度看着不对 | 反馈帧是设备**主动上报**的，某些固件上它会陈旧 | 看 `~/joint_feedback` 的 `feedback_stale`；**要真值直接读端点**：`$J read --paths axis0.encoder.pos_estimate,axis0.encoder.vel_estimate` |
 | 实时性不达标（抖动大 / 丢拍多） | 没有 RT 权限，或被内核限流 | 按 §1.2 配 RT；`$J status` 的 `tick_overruns`、`rt_throttled` 是判据 |
-| `calib` / `home` 失败 | 虚拟后端不实现这两个状态机；真机上未标定/有故障时设备也会拒 | 先 `jr_hw_verify` 看标定标志；真机路径见 DESIGN §13.4 的待办 |
+| `calib` / `home` 失败 | ① 虚拟后端不实现这两个状态机；② **`home` 需要限位开关** —— 本模组没有，设备直接报 `detail_err=0x00020000`(`HOMING_WITHOUT_ENDSTOP`) 并超时；③ 有故障未清时使能也会超时（实测） | 先 `$J fault-reset`（不动电机）清错误，再 `jr_hw_verify` 看标定标志；`home` 在本模组上属**设备侧不支持**，别当 bug 查 |
 | 节点起不来，日志说 `bus_lock` 被占 | 上一次没退干净（尤其被 `kill -9`） | `pkill -x jr_bus`（**别用 `-f`**）；仍然占着就按报错里的 PID 处理 |
 | 起节点报 `cannot open '/dev/ttyACM0' (slcan): invalid-argument` | 串口被别的进程占着 —— **最常见**是你自己起了 `slcand -o -c -s8 /dev/ttyACM0 slcan0` | 二选一：① 停掉 `slcand`（走裸串口路径）；② 改成 SocketCAN：`type: socketcan` + `interface: slcan0`（同一根物理总线，**不需要 sudo**） |
 
@@ -749,7 +749,7 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 - **每条总线 ≤ 7 关节**（广播同步寻址上限）；超过会被预算检查拒绝。
 - **反馈帧**（`~/joint_feedback` 的位置/速度）在某些固件上可能**陈旧**：我们会如实打
   `FEEDBACK_STALE`，`age_ms` 也不会假报"刚刚更新"；**把反馈源改成自动端点轮询还没做**（见 DESIGN §13.4）。
-- **`calib` / `home` 的真机成功路径尚未验证**（虚拟设备不实现这两个状态机；真机上被急停锁存挡住过）。
+- **`calib` / `home`**：`calib` 已在真机跑通（读回 `pre_calibrated=true`，关节真的转了）；`home` 的失败**归因在设备侧** —— 本模组没有限位开关，设备报 `HOMING_WITHOUT_ENDSTOP`(0x20000) 并超时，`HOME` 这条路径在当前硬件上不可用（虚拟后端两个状态机都不实现）。
 - `jr_latency_bench`（实时性能基准工具）**未实现**（需要真机才有意义）。
 - `desc-import --persist`（把描述符写进设备 Flash）**不支持**（SDK 没有这个能力，会被明确拒绝，不会静默忽略）。
 - **Windows / macOS** 不支持 ROS 侧（节点、`ros2_control`、`jr_ctl`）。
@@ -757,7 +757,7 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 
 ---
 - **位置/速度的“新鲜度”**：默认仍以设备上报帧为准，而本链路/固件上该帧可能陈旧（`feedback_stale`）。想要真值可开 `jr.feedback.endpoint_poll_ms`（默认关）—— 但它**只在关节都失能时**工作（读参数要暂停 tick，而暂停会先安全失能），并且**在真机上** 1000 ms 档实测约 4100 丢拍/s（5000 ms 档约 9 丢拍/次，可用）⇒ 真机建议 **5000 ms 起**。另：实测该帧可以**冻在 0.0**（`position/velocity=0/0` 而关节真值非零），这正是要开轮询的理由。
-- **`calib` / `home`** 仍无真机正例（会动关节，等确认）；`estop` 锁存后 `fault-reset` 清不掉，只有软复位/断电重启（§9.3）。
+- **`estop` 锁存**：`fault-reset` 清不掉，只有软复位/断电重启能清（§9.3）；清了之后 `enable`/`jog` 一次通过（实测 `500 ms / 284 ticks`）。
 
 ## 11. 目录、文档、版本、许可
 
