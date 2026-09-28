@@ -534,7 +534,6 @@ constexpr std::uint32_t kFeedbackAgeUnknown = 0xFFFFFFFFu;  /**< "未知 / 从�
 constexpr std::uint32_t kFeedbackAgeStaleCap = 0xFFFFFFFEu; /**< 陈旧年龄的饱和上限 */
 
 std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns, bool stale,
-                              bool valid,
                               std::uint32_t sdk_age_ms) noexcept;
 
 }  // namespace rt

@@ -1786,16 +1786,17 @@ void BusRuntime::request_disable_all() noexcept
 }
 
 std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns, bool stale,
-                              bool valid, std::uint32_t sdk_age_ms) noexcept
+                              std::uint32_t sdk_age_ms) noexcept
 {
     if (!stale) return sdk_age_ms;                  /* 完全新鲜 ⇒ 用设备侧的采样年龄 */
-    /* ⚠ v0.20 修正（真机实测 + SDK 侧确认）：本固件上 `FEEDBACK_STALE` 是**粘滞**的
-       —— 启动瞬间置位后要 `clear_status_flags()` 才清；而 SDK 的 `age_ms` 依然如实反映
-       "距最近一次有效反馈"。⇒ 前提是 SDK **本周期确实解到了新帧**（`valid`）——
-       满足时才如实转达它的年龄（**包括 0**：本周期刚到）；否则仍用我们自己的口径，
-       免得"粘滞位 + 旧值"被报成"刚刚更新"（F11 最初要防的就是这个）。 */
-    if (valid && sdk_age_ms != kFeedbackAgeUnknown) return sdk_age_ms;
-    if (last_fresh_ns == 0u) return kFeedbackAgeUnknown;   /* 从未新鲜过 ⇒ 不编一个数字 */
+    /* ⚠ v0.20 定稿（SDK 侧确认 + 真机复核）：**`age_ms` 一直是可靠的**
+       —— 它是"距最近一次有效反馈"的毫秒数；而 `status_flags` 的 `FEEDBACK_STALE`
+       在本固件上是**粘滞**的（启动瞬间置位后不会自己清），`valid` 则是**每周期**旗标
+       （只说明"这一拍有新帧"）。⇒ 粘滞位下必须**如实转达** `age_ms`（**包括 0**）。
+       ⚠ 我们中途试过"必须 valid 才转达年龄"，结果把唯一可靠的量挡掉了 —— 真机上
+       待机时 age 永远是"未知"（因为发布路径上的 `valid` 常常是 false）。已改回。 */
+    if (sdk_age_ms != kFeedbackAgeUnknown) return sdk_age_ms;
+    if (last_fresh_ns == 0u) return kFeedbackAgeUnknown;   /* 设备连哨兵都没给 ⇒ 不编数字 */
     const std::uint64_t ms = (now_ns - last_fresh_ns) / 1000000ull;
     return (ms >= static_cast<std::uint64_t>(kFeedbackAgeStaleCap))
                ? kFeedbackAgeStaleCap
@@ -1912,7 +1913,7 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
             o.bus_voltage = fb.vbus_V;
             o.bus_current = fb.ibus_A;
             /* ⚠ 不直接转发 SDK 的 `age_ms`：它会与 STALE 标志自相矛盾（见头文件注释）。 */
-            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], stale, fb.valid != 0, fb.age_ms);
+            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], stale, fb.age_ms);
             o.err_code = fb.err_code;
             o.hb_error = fb.hb_error;
             o.axis_error = fb.axis_error;
@@ -1928,7 +1929,7 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
         } else {
             /* 拿不到反馈（`!have`）：旧值会留在快照里，**必须标清楚它不是新鲜的**，
                否则上层（话题/日志）会把上一拍的值当当前值用 —— “说得比知道的多”。 */
-            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], true, false, 0u);
+            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], true, 0u);
             o.valid_fresh = false;
             o.feedback_stale = true;
         }
