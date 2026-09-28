@@ -105,6 +105,20 @@ void test_is_fd_reaches_the_bus()
     JR_CHECK_MSG(build_scan_bus_cfg(HalKind::kSlcan, o).is_fd == false,
                  "未指定 --is-fd 时应当 Classic 起步（SDK 推荐），而不是默认 FD");}
 
+/* ⚠ 默认 master_id 为什么要避开 node_id：帧 ID 是 pri|msgtype|dest|source|seq，
+   `master_id == node_id` 时**请求与应答的 CAN ID 完全相同** ⇒ 抓包分不清收发。
+   v0.19 实测踩过：据此误判"设备只发心跳、不回 MIT 应答"，白查一轮。 */
+void test_master_id_default_avoids_node_id()
+{
+    JR_CASE("③ 默认 master_id 要避开 node_id（相同 ⇒ 请求/应答共用一个 CAN ID）");
+    const ScanCfgOpts def;
+    JR_CHECK_EQ(def.master_id, 126u);
+    JR_CHECK_MSG(def.master_id != 1u,
+                 "默认不能是 1：node_id 通常是 1..7，撞上后抓包分不清收发");
+    JR_CHECK_MSG(def.master_id != 0u, "master_id=0 时设备完全不回");
+    JR_CHECK_EQ(static_cast<unsigned>(build_scan_bus_cfg(HalKind::kSlcan, def).master_id), 126u);
+}
+
 void test_every_backend_builds_a_valid_bus()
 {
     JR_CASE("每个后端都要能造出一条能过闸门的总线（新后端别忘字段）");
@@ -143,5 +157,6 @@ int main()
     test_slcan_needs_serial_baud();
     test_is_fd_reaches_the_bus();
     test_every_backend_builds_a_valid_bus();
+    test_master_id_default_avoids_node_id();
     return ::jrtest::report();
 }

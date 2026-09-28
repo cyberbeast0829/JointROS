@@ -512,7 +512,7 @@ bool read_feedback(Loader &L, const YAML::Node &jr, Config &c)
     if (!n) return true;
     if (!keys_ok(L, n, "feedback",
                  {"source", "heartbeat_ms", "poll_period_ms", "publish_hz", "joint_state_hz",
-                  "endpoint_poll_ms"})) {
+                  "endpoint_poll_ms", "state_request_ms"})) {
         return false;
     }
 
@@ -577,6 +577,20 @@ bool read_feedback(Loader &L, const YAML::Node &jr, Config &c)
         }
         /* 下发给每条总线（总线级字段，便于将来按总线覆盖）。 */
         for (unsigned b = 0u; b < c.bus_count; ++b) c.buses[b].feedback_poll_ms = L.node.endpoint_poll_ms;
+    }
+
+    /* F31：非阻塞状态请求（0x41/0x44）。0 = 关闭（默认）。
+       下限 100 ms = SDK 建议的 ≤10 Hz/关节（一次请求占 2 帧总线时间）。 */
+    if (n["state_request_ms"]) {
+        L.node_key("feedback.state_request_ms");
+        if (!need_u32(L, n, "feedback", "state_request_ms", L.node.state_request_ms)) return false;
+        if (L.node.state_request_ms != 0u &&
+            (L.node.state_request_ms < 100u || L.node.state_request_ms > 5000u)) {
+            return L.fail("feedback.state_request_ms: must be 0 (off) or in 100..5000 (got " +
+                          std::to_string(L.node.state_request_ms) +
+                          "); the SDK recommends <=10 Hz per joint");
+        }
+        for (unsigned b = 0u; b < c.bus_count; ++b) c.buses[b].state_request_ms = L.node.state_request_ms;
     }
     return true;
 }

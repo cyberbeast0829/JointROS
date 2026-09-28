@@ -354,6 +354,14 @@ public:
     /** 该关节当前有没有可用的轮询值（诊断/日志用）。 */
     bool has_polled(unsigned joint_index) const noexcept;
 
+    /* ===================== F31：非阻塞状态请求（0x41） ===================== */
+
+    /** 该不该现在发一次状态请求（**纯函数**，单测钉住限速边界）。
+     *  `period_ms == 0` ⇒ 永不发；`last_ns == 0` ⇒ 首次立即发（待机时尽快拿到新鲜值）；
+     *  `now < last`（时间倒退）⇒ 不发（避免疯狂重发把总线灌满）。 */
+    static bool state_request_due(std::uint64_t now_ns, std::uint64_t last_ns,
+                                  unsigned period_ms) noexcept;
+
     void fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept;
 
     /**
@@ -504,6 +512,9 @@ private:
         std::atomic<std::uint32_t> valid{0u};
     };
     PolledPV polled_[kMaxJointsPerBus] = {};
+
+    /** F31：上次发出状态请求的时刻（0 = 从未发过 ⇒ 首次立即发）。 */
+    std::uint64_t last_state_req_ns_ = 0u;
     char        snapshot_note_[160] = {};
 };
 
@@ -523,6 +534,7 @@ constexpr std::uint32_t kFeedbackAgeUnknown = 0xFFFFFFFFu;  /**< "未知 / 从�
 constexpr std::uint32_t kFeedbackAgeStaleCap = 0xFFFFFFFEu; /**< 陈旧年龄的饱和上限 */
 
 std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns, bool stale,
+                              bool valid,
                               std::uint32_t sdk_age_ms) noexcept;
 
 }  // namespace rt

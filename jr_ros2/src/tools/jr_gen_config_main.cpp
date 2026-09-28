@@ -50,7 +50,7 @@ struct Options {
     std::string lock_dir;
     std::string mode = "mit";
     unsigned    probe = 16u;
-    unsigned    master_id = 1u;
+    unsigned    master_id = 126u;   /* 默认避开 node_id：相同时请求/应答会共用同一个 CAN ID */
     double      rate_hz = 1000.0;
     int         is_fd = -1;       /* -1 = 未指定（Classic 起步，SDK 按对端帧对齐） */
     unsigned    serial_baud = 115200u;  /* 仅 slcan：**串口**速率，不是 CAN 速率 */

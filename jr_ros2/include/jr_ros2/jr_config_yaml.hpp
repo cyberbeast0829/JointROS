@@ -43,7 +43,20 @@ struct NodeCfg {
      *  ⚠ 只在**本条总线上所有关节都失能**时才轮询：读参数要进安全暂停窗口，而
      *  `TickGroup::pause()` 的语义是**先安全失能**（见 "rt/jr_ops.hpp" 注释）——
      *  拿它做 10 Hz 轮询会变成每秒失能/使能十次。在动的关节不会因为开了这个键被打断。 */
-    std::uint32_t endpoint_poll_ms = 0u;};
+    std::uint32_t endpoint_poll_ms = 0u;
+
+    /** F31：**非阻塞状态请求**周期（ms；0 = 关闭，默认）。
+     *
+     *  开着它会在 tick 的 `cycle_end()` 之后按周期发 `QUERY_POS_VEL`(0x41)
+     *  （`jsdk_joint_request_state()`：**发出即返回、不与 tick 互斥**），应答由 SDK 的收帧
+     *  路径回填到反馈缓存 ⇒ “驱动中的新鲜位置/速度”不再需要暂停 tick 去读端点。
+     *
+     *  ⚠ 0x41/0x44 **不喂设备看门狗**（SDK 头文件原话）⇒ 只能**额外**发，不能顶替控制帧。
+     *  ⚠ 建议 **≤10 Hz/关节**（SDK 头文件原话）：一次请求占 2 帧的总线时间。
+     *  ⚠ 与 `endpoint_poll_ms` 不同：那个要进安全暂停窗口（会先失能关节），只适合待机时
+     *  交叉核对；这个可以在**驱动中**用。 */
+    std::uint32_t state_request_ms = 0u;
+};
 
 /** 加载结论（比 `Result` 多两项**必须让用户看到**的事实）。 */
 struct YamlLoadReport {

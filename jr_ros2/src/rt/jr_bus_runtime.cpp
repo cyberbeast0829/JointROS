@@ -1688,12 +1688,24 @@ void BusRuntime::set_note(const char *text) noexcept
     std::snprintf(snapshot_note_, sizeof(snapshot_note_), "%s", text != nullptr ? text : "");
 }
 
-void BusRuntime::tick_end(std::uint64_t /*now_ns_in*/) noexcept
+void BusRuntime::tick_end(std::uint64_t now_ns_in) noexcept
 {
     if (ctx_ == nullptr) return;
     const jsdk_status_t st = jsdk_context_cycle_end(ctx_);
     if (st != JSDK_OK && st != static_cast<jsdk_status_t>(last_cycle_status_)) {
         last_cycle_status_ = static_cast<int>(st);
+    }
+
+    /* F31：非阻塞状态请求（QUERY_POS_VEL 0x41）。
+       时序按 SDK 头文件推荐的做法：**在 `cycle_end()` 之后**发请求，应答由下一次
+       `cycle_begin()` 的收帧路径解码并回填到反馈缓存（典型延迟 1–2 个 tick）。
+       ⚠ 0x41 **不喂设备看门狗** ⇒ 这只是"额外"的查询帧，控制帧照发不误。
+       ⚠ 它在 RT 路径上，只做一次 HAL 写（≤2 帧总线时间）—— 不做重发、不排队、不等应答。 */
+    if (state_request_due(now_ns_in, last_state_req_ns_, bus_.state_request_ms)) {
+        last_state_req_ns_ = now_ns_in;
+        for (unsigned j = 0u; j < joint_count_; ++j) {
+            (void)jsdk_joint_request_state(joints_[j], JSDK_STATE_POS_VEL);
+        }
     }
 }
 
@@ -1774,9 +1786,15 @@ void BusRuntime::request_disable_all() noexcept
 }
 
 std::uint32_t feedback_age_ms(std::uint64_t now_ns, std::uint64_t last_fresh_ns, bool stale,
-                              std::uint32_t sdk_age_ms) noexcept
+                              bool valid, std::uint32_t sdk_age_ms) noexcept
 {
-    if (!stale) return sdk_age_ms;                  /* 新鲜 ⇒ 用设备侧的采样年龄（更有意义） */
+    if (!stale) return sdk_age_ms;                  /* 完全新鲜 ⇒ 用设备侧的采样年龄 */
+    /* ⚠ v0.20 修正（真机实测 + SDK 侧确认）：本固件上 `FEEDBACK_STALE` 是**粘滞**的
+       —— 启动瞬间置位后要 `clear_status_flags()` 才清；而 SDK 的 `age_ms` 依然如实反映
+       "距最近一次有效反馈"。⇒ 前提是 SDK **本周期确实解到了新帧**（`valid`）——
+       满足时才如实转达它的年龄（**包括 0**：本周期刚到）；否则仍用我们自己的口径，
+       免得"粘滞位 + 旧值"被报成"刚刚更新"（F11 最初要防的就是这个）。 */
+    if (valid && sdk_age_ms != kFeedbackAgeUnknown) return sdk_age_ms;
     if (last_fresh_ns == 0u) return kFeedbackAgeUnknown;   /* 从未新鲜过 ⇒ 不编一个数字 */
     const std::uint64_t ms = (now_ns - last_fresh_ns) / 1000000ull;
     return (ms >= static_cast<std::uint64_t>(kFeedbackAgeStaleCap))
@@ -1832,6 +1850,15 @@ bool BusRuntime::has_polled(unsigned joint_index) const noexcept
     return polled_[joint_index].valid.load(std::memory_order_acquire) != 0u;
 }
 
+bool BusRuntime::state_request_due(std::uint64_t now_ns, std::uint64_t last_ns,
+                                   unsigned period_ms) noexcept
+{
+    if (period_ms == 0u) return false;        /* 功能关闭 */
+    if (last_ns == 0u) return true;           /* 首次：立即发（待机时尽快拿到新鲜值） */
+    if (now_ns < last_ns) return false;       /* 时间倒退（不该发生）⇒ 宁可不发 */
+    return (now_ns - last_ns) >= static_cast<std::uint64_t>(period_ms) * 1000000ull;
+}
+
 void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept
 {
     const std::uint64_t now = now_ns();
@@ -1885,7 +1912,7 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
             o.bus_voltage = fb.vbus_V;
             o.bus_current = fb.ibus_A;
             /* ⚠ 不直接转发 SDK 的 `age_ms`：它会与 STALE 标志自相矛盾（见头文件注释）。 */
-            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], stale, fb.age_ms);
+            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], stale, fb.valid != 0, fb.age_ms);
             o.err_code = fb.err_code;
             o.hb_error = fb.hb_error;
             o.axis_error = fb.axis_error;
@@ -1901,7 +1928,7 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
         } else {
             /* 拿不到反馈（`!have`）：旧值会留在快照里，**必须标清楚它不是新鲜的**，
                否则上层（话题/日志）会把上一拍的值当当前值用 —— “说得比知道的多”。 */
-            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], true, 0u);
+            o.age_ms = feedback_age_ms(now, last_fresh_ns_[j], true, false, 0u);
             o.valid_fresh = false;
             o.feedback_stale = true;
         }

@@ -25,7 +25,12 @@ namespace tools {
 struct ScanCfgOpts {
     std::string channel;               /**< socketcan/pcan/slcan = 接口名；virtual = 规格串 */
     std::string bus_name;              /**< 空 = 取 channel（virtual 取 "virt"） */
-    unsigned    master_id = 1u;
+    /** 主站 ID。**默认 126（刻意避开 node_id）**：
+     *  协议帧 ID 是 `pri\|msgtype\|dest\|source\|seq` —— `master_id == node_id` 时
+     *  **请求帧与应答帧的 CAN ID 完全相同**，抓包/排障时分不清收发
+     *  （v0.19 实测踩过：据此误判"设备只发心跳、不回 MIT 应答"）。
+     *  取值 1..254（0 = 设备完全不回，见 `jr_config.hpp`）。 */
+    unsigned    master_id = 126u;
     /** -1 = 命令行没给 ⇒ **Classic 起步**（SDK 会按对端帧自动对齐）；
         0 / 1 = 明确指定。⚠ 以前这个值压根没进总线配置（§13.3-47 ②）。 */
     int         is_fd = -1;

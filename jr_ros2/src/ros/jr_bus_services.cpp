@@ -520,9 +520,19 @@ void JrBusServices::create()
      *  先确认端点真的在描述符里，再开定时器 —— 路径猜错就变成一个
      *  每 100 ms 报一次错的噪声源。对不上的时候宁可不开，并说清楚为什么。
      * ==================================================================== */
+    /* F31：非阻塞状态请求（QUERY_POS_VEL 0x41）。在 tick 的 cycle_end() 之后发、**不与 tick 互斥**
+       ⇒ 驱动中也能拿到新鲜位置/速度（0x41 的应答由 SDK 回填到反馈缓存）。
+       ⚠ 0x41 **不喂设备看门狗**（SDK 头文件原话）⇒ 它只是"额外"的查询帧，控制帧必须照发。 */
+    if (bus_cfg().state_request_ms > 0u) {
+        RCLCPP_INFO(node->get_logger(),
+                    "state request: QUERY_POS_VEL (0x41) every %u ms per joint — non-blocking, sent "
+                    "after cycle_end(). It does NOT feed the device watchdog, so control frames must "
+                    "keep flowing (SDK recommends <=10 Hz per joint)",
+                    bus_cfg().state_request_ms);
+    }
+
     const unsigned poll_ms = bus_cfg().feedback_poll_ms;
-    if (poll_ms > 0u) {
-        EndpointInfo ep_pos;
+    if (poll_ms > 0u) {        EndpointInfo ep_pos;
         EndpointInfo ep_vel;
         Result r1;
         Result r2;

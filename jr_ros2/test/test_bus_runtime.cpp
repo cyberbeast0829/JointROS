@@ -843,21 +843,50 @@ void test_feedback_age_is_honest()
     constexpr std::uint64_t kJan = 5ull * kS;   /* 进程起点附近的某个“从未”时刻 */
 
     /* ① 新鲜：直接用设备侧年龄（它比我们更有意义） */
-    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, false, 37u), 37u);
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, false, /*valid=*/true, 37u), 37u);
 
-    /* ② 陈旧 + 从未见过新鲜帧 ⇒ 不许编一个数字（历史上这里报的是 0，看着像“刚刚”） */
-    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, 0u), kFeedbackAgeUnknown);
+    /* ② v0.20 改口径（真机复核后）：粘滞 STALE 位下，SDK 报 0 是**真的**"本周期刚到" ⇒ 如实报 0；
+          只有 SDK 给哨兵（无信息）时才退回我们自己的口径。
+          历史：F11a 当时看到"报 STALE 同时报 0"很可疑，现在知道根因是那位粘滞、
+          而当时被判为"冻住"的值其实是**另一个信号**（见 DESIGN §13.3-54 的更正）。 */
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, /*valid=*/true, kFeedbackAgeUnknown), kFeedbackAgeUnknown);
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, /*valid=*/true, 0u), 0u);
+    /* 没有新帧（valid=false）+ SDK 报 0 ⇒ 仍然不信（这才是 F11 最初要防的"看着刚刚"） */
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, /*valid=*/false, 0u), kFeedbackAgeUnknown);
 
     /* ③ 陈旧 + 有历史 ⇒ 真实经过时间；**关键断言：不可能是 0** */
     const std::uint64_t fresh = 100ull * kS;
-    const std::uint32_t age = feedback_age_ms(fresh + 2500ull * 1000000ull, fresh, true, 0u);
+    const std::uint32_t age = feedback_age_ms(fresh + 2500ull * 1000000ull, fresh, true,
+                                              /*valid=*/false, 0u);
     JR_CHECK_EQ(age, 2500u);
     JR_CHECK_MSG(age != 0u, "陈旧帧的年龄不许是 0");
 
     /* ④ 饱和：极端经过时间不能溢出成“新鲜” */
-    const std::uint32_t big = feedback_age_ms(~0ull, 1ull, true, 0u);
+    const std::uint32_t big = feedback_age_ms(~0ull, 1ull, true, /*valid=*/false, 0u);
     JR_CHECK_EQ(big, kFeedbackAgeStaleCap);
     JR_CHECK_MSG(big != kFeedbackAgeUnknown, "饱和值必须与“未知”哨兵区分开");
+
+    /* ⑤ v0.20：粘滞 STALE 位下，SDK 的年龄仍然可信 ⇒ 要如实转达，
+          不能抹成“未知”（真机实测就是这种情形）。但 SDK 报 0 时仍不信。 */
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, /*valid=*/true, 120u), 120u);
+    JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, /*valid=*/false, 0u), kFeedbackAgeUnknown);
+}
+
+/* F31：状态请求的限速判定（纯函数）。 */
+static void test_state_request_due()
+{
+    JR_CASE("状态请求限速：0 = 关，节奏不能比周期密");
+    constexpr std::uint64_t kMs = 1000000ull;
+
+    /* 关闭 ⇒ 永不发 */
+    JR_CHECK(!rt::BusRuntime::state_request_due(1000ull * kMs, 0u, 0u));
+    /* 首次（last=0）⇒ 立即发，让待机时尽快拿到新鲜值 */
+    JR_CHECK(rt::BusRuntime::state_request_due(1000ull * kMs, 0u, 100u));
+    /* 未到周期 ⇒ 不发；刚好到 ⇒ 发 */
+    JR_CHECK(!rt::BusRuntime::state_request_due(1050ull * kMs, 1000ull * kMs, 100u));
+    JR_CHECK(rt::BusRuntime::state_request_due(1100ull * kMs, 1000ull * kMs, 100u));
+    /* 时间倒退（不该发生）⇒ 不发，免得疯狂重发把总线灌满 */
+    JR_CHECK(!rt::BusRuntime::state_request_due(900ull * kMs, 1000ull * kMs, 100u));
 }
 
 /**
@@ -977,5 +1006,6 @@ int main()
     test_feedback_age_is_honest();
     test_lock_key_follows_channel();
     test_polled_usable_is_honest();
+    test_state_request_due();
     return jrtest::report();
 }

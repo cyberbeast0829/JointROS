@@ -281,6 +281,8 @@ struct BusCfg {
                                                自己去读端点），见 `jr_config_yaml.hpp`。 */
     /** F11：端点轮询周期（ms，0 = 关闭）。由 `jr.feedback.endpoint_poll_ms` 下发到每条总线。 */
     std::uint32_t  feedback_poll_ms = 0u;
+    /** F31：非阻塞状态请求周期（ms，0 = 关闭）。由 `jr.feedback.state_request_ms` 下发。 */
+    std::uint32_t  state_request_ms = 0u;
 
     double         max_bus_load = 0.60;   /**< 启动预算检查阈值（超 → 拒绝；0.6~0.8 → 警告） */
 
