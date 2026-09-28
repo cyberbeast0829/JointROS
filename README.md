@@ -409,6 +409,9 @@ jr:
                           #   按周期读 pos_estimate/vel_estimate，用它覆盖话题里的位置/速度，
                           #   并置 status_flags 的 0x80000000 表示来源。关节一动它自动停
                           #   （读参数要暂停 tick，而暂停会先安全失能）。真机建议 5000（真机上 1000 ms 实测约 4100 丢拍/s）
+    state_request_ms: 0    # F31：非阻塞状态请求（0 = 关，默认）。>0 时在 tick 里按周期发 QUERY_POS_VEL(0x41)，
+                          #   发出即返回、**不需要安全暂停窗口 ⇒ 驱动中也能用**；SDK 建议 ≤10 Hz/关节
+                          #   （100..5000）。⚠ 该帧不喂设备看门狗，只是额外查询；判新鲜度看 age_ms
     source: broadcast_heartbeat  # broadcast_heartbeat | heartbeat_only | unicast_poll | unicast_only
     heartbeat_ms: 5              # 期望的设备心跳周期
     poll_period_ms: 10           # SDK 轮询周期（只在上面选 unicast_* 时有用）
@@ -740,6 +743,7 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 | `calib` / `home` 失败 | ① 虚拟后端不实现这两个状态机；② **`home` 需要限位开关** —— 本模组没有，设备直接报 `detail_err=0x00020000`(`HOMING_WITHOUT_ENDSTOP`) 并超时；③ 有故障未清时使能也会超时（实测） | 先 `$J fault-reset`（不动电机）清错误，再 `jr_hw_verify` 看标定标志；`home` 在本模组上属**设备侧不支持**，别当 bug 查 |
 | 节点起不来，日志说 `bus_lock` 被占 | 上一次没退干净（尤其被 `kill -9`） | `pkill -x jr_bus`（**别用 `-f`**）；仍然占着就按报错里的 PID 处理 |
 | 起节点报 `cannot open '/dev/ttyACM0' (slcan): invalid-argument` | 串口被别的进程占着 —— **最常见**是你自己起了 `slcand -o -c -s8 /dev/ttyACM0 slcan0` | 二选一：① 停掉 `slcand`（走裸串口路径）；② 改成 SocketCAN：`type: socketcan` + `interface: slcan0`（同一根物理总线，**不需要 sudo**） |
+| 直接用 SDK / 工具时报 `configure: transport ... could not be sent` | 它们**默认按 CAN FD 起步**，而 Classic 链路（接口 `mtu 16`）上第一次发送必然失败（顺带：`master_id == node_id` 时请求与应答**共用一个 CAN ID**，抓包分不清收发） | 显式声明 Classic（Python `is_fd=False`、`jsdk-cli --classic`；本仓库生成的配置本来就有 `is_fd: false`）；`master_id` 取与 node_id 不同的值（生成器默认已改成 126） |
 
 ---
 
