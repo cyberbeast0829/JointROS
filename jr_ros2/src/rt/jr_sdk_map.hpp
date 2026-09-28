@@ -42,8 +42,11 @@ inline Status map_sdk_status(jsdk_status_t st) noexcept
 /**
  * 由 SDK 的错误文本推断"下一步该做什么"。
  *
- * ⚠ 只做**粗分类**：最终结论必须看原始位与计数（见 DESIGN §8.6 —— 固件把 estop 与
- *   看门狗都报成 CAN_TIMEOUT，光看摘要会把两类完全不同的问题混成一个）。
+ * ⚠ 只做**粗分类**：最终结论必须看原始位与计数（见 DESIGN §8.6 —— 固件把 `ESTOP_REQUESTED`
+ *   与 `CAN_BUS_FAILED` 都报成 `CAN_TIMEOUT`，光看摘要会把两类完全不同的问题混成一个）。
+ * ⚠ **别在摘要值上做分支**：0x8 的含义随固件版本反转（v4.1_base 之前 = `CAN_TIMEOUT`，
+ *   之后 = `OVERLOAD`，而 `CAN_TIMEOUT` 挪到 0x9），0x4 也从 `UNDER_VOLTAGE` 改名 `VOLTAGE`
+ *   （欠压与过压同码）—— 同一个数字在不同固件上是不同的事（SDK commit 8253678）。
  */
 inline Advice advice_from_sdk_text(const char *sdk_text) noexcept
 {

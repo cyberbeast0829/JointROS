@@ -723,7 +723,8 @@ ros2 topic list | grep faults               # 故障事件话题（平时安静�
 ```
 
 ⚠ **别只看摘要**：`JointFeedback.error_code` 是 MIT 协议的 **4-bit 摘要**，会把不同故障映射成同一个值
-（我们实测过：急停与看门狗都报 `CAN_TIMEOUT`）。**排障请看原始位**：
+（`ERROR_ESTOP_REQUESTED` 与 `CAN_BUS_FAILED` 都报成 `CAN_TIMEOUT`）。**排障请看原始位**：
+⚠⚠ **别在摘要值上做分支**：`0x8` 的含义随固件版本反转 —— v4.1_base 之前是 `CAN_TIMEOUT`，之后是 `OVERLOAD`（而 `CAN_TIMEOUT` 挪到 `0x9`）；`0x4` 也从 `UNDER_VOLTAGE` 改名 `VOLTAGE`（欠压与过压同码）。**同一个数字在不同固件上是不同的事**。
 `heartbeat_error`（心跳子系统位图）、`axis_error`（32-bit），以及 `$J status` 的 `note`。
 
 ### 9.3 排障表（症状 → 最可能原因 → 怎么办）

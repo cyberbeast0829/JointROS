@@ -1,8 +1,11 @@
 # 单个关节的状态快照（DESIGN §6.1）。物理量一律**输出端** SI 单位。
 #
 # ⚠ `error_code` 是 MIT 4-bit **摘要**，会把不同故障映射成同一个值
-#   （实测：estop 与看门狗都报 CAN_TIMEOUT）→ 排障请看 `heartbeat_error`（原始位）
-#   与 `axis_error`（32-bit 原始位）。摘要只用于快速浏览。
+#   （`ESTOP_REQUESTED` 与 `CAN_BUS_FAILED` 都报成 `CAN_TIMEOUT`）→ 排障请看 `heartbeat_error`（原始位）
+#  与 `axis_error`（32-bit 原始位）。摘要只用于快速浏览。
+# ⚠⚠ **不要在摘要值上做分支**：0x8 的含义随固件版本反转 ——
+#  v4.1_base 之前：`CAN_TIMEOUT`=0x8；v4.1_base 起：`OVERLOAD`=0x8、`CAN_TIMEOUT`=0x9；
+#  且 0x4 由 `UNDER_VOLTAGE` 改名为 `VOLTAGE`（欠压与过压同码）。同一个数字可能是两件事。
 
 std_msgs/Header header          # stamp = 本 tick 起始时刻换算到 ROS 时间基（§6.6）
 

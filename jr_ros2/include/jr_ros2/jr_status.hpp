@@ -43,7 +43,8 @@ enum class Advice : std::uint8_t {
     kCheckBusConfig,             /**< 查位定时/FD 开关/通道名与设备侧是否一致 */
     kReduceRateOrRaiseWatchdog,  /**< 控制周期与设备 break_timeout 不匹配 */
     kCheckTemperature,           /**< 过温 */
-    kCheckSupplyVoltage,         /**< 母线电压异常（注意固件把过压报成 UNDER_VOLTAGE） */
+    kCheckSupplyVoltage,         /**< 母线电压异常（⚠ 欠压与过压**同码**：v4.1_base 起叫 VOLTAGE(0x4)，
+                                      之前叫 UNDER_VOLTAGE —— 名字里不带过压不代表过压不报这里） */
     kCalibrationRequired,        /**< 需先标定 */
     kEnsureSingleMaster,         /**< 同总线可能有第二个主站 */
     kCheckRtPermissions,         /**< SCHED_FIFO/mlockall 失败 → 实时性无保证 */

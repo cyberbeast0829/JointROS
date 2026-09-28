@@ -1054,7 +1054,9 @@ void JrBusNode::diag_joint(unsigned local_index, diagnostic_updater::DiagnosticS
     stat.add("cmd_rejected", j.cmd_rejected);
     stat.add("error_code_raw", static_cast<int>(j.err_code));
     stat.add("error_code_note",
-             "4-bit SUMMARY only (estop and watchdog both map to CAN_TIMEOUT) — see the raw bit fields");
+             "4-bit SUMMARY only; ESTOP_REQUESTED and CAN_BUS_FAILED both map to it, and the value of 0x8 "
+             "flipped with the firmware (before v4.1_base: CAN_TIMEOUT=0x8; from v4.1_base: OVERLOAD=0x8, "
+             "CAN_TIMEOUT=0x9) — always read the raw bit fields instead");
     stat.add("heartbeat_error_raw", static_cast<int>(j.hb_error));
     stat.add("axis_error_raw", j.axis_error);
     stat.add("status_flags_raw", j.status_flags);
