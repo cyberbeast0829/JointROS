@@ -1917,6 +1917,17 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
       ③ **问题在"哪一帧/哪个字段"**：SDK 解给我们的 `position` **全程冻结**（0.1054，不随真值变），而同一快照的 `velocity` 会更新 ⇒ 更像是**选帧/字段映射**或固件侧该字段不刷新；并且 `status_flags` **三态下恒为 8（FEEDBACK_STALE）** ⇒ `age_ms` 永远是"未知"（0xFFFFFFFF）。
 
       ➡ 因此给 SDK 侧的问题应当是这个（比"陈旧的成因"具体得多）：**`0x19200404` 与 `0x08000404`–`08000407` 分别是什么帧、反馈该用哪一组、`position` 为什么冻结、为什么恒标 STALE**。我们的兜底（失能后读端点）不受影响。
+
+    - **⚠⚠ v0.19 更正（SDK 侧答复 + 真机复测）：本节早前的"帧陈旧/位置冻结"有一半是我方误读，如实改口**。
+      按 SDK 侧要求把 `master_id` 改成 **126**（≠ node_id）重抓，并让关节**真正大幅运动**（kp=20、目标 -0.5 rad）对照：
+
+      ① **收发 ID 会撞**：`master_id == node_id` 时请求与应答的 CAN 帧 ID **完全相同**（位域见固件 `proto_cyberbeast/cb_frame.h`：`pri\|msgtype\|dest\|source\|seq`）⇒ 早前"点动时只有我们那 4 个 ID、设备没回应答"这个推断**无效**；把 master_id 分开后一眼可见设备**每个 seq 都在回** MIT 应答（约 244–245 帧/seq，`mt=0x00 dst=126 src=1`）。
+      ② **`position` 不是"冻结"**：关节真动时反馈帧的 `position` 从 -0.052 跟到 **-0.486**，与 `axis0.encoder.pos_estimate`（-0.607）**不是同一个信号**（差值随幅值变化 ⇒ 更像另一个估计/单位、或约 100 ms 旧），而**不是**"不刷新"。早前断言"全程冻结"，是因为**那次点动没能真的移动关节**（端点真值也没动）⇒ 结论不成立。
+      ③ **心跳既没坏也没被钳位**：`axis0.config.can.heartbeat_rate_ms = 100`（不是我们以为的 5）、实测 **30 帧/3 s = 10 Hz**，与配置一致；SDK 的 stale 阈值 `max(50 ms, 100×3, …) = 300 ms` ⇒ **按年龄根本不该 stale**。真正的成因是 **STALE 位启动瞬间置位后粘滞**（要 `clear_status_flags()` 才清），而 `age_ms` 又被我们的规则抹成 `0xFFFFFFFF` ⇒ 看起来像"永远陈旧"。
+      ④ **我方四处错误**（同一种失败模式：拿支撑不住的测量下结论）：搜 `get_state` 而非 `request_state` ⇒ 误称"SDK 没有非阻塞读路径"；把 `heartbeat_rate_ms` 记成 5（从未在真机复核）；用一次"关节没动"的测试断言"position 冻结"；在 `master_id == node_id` 时按 ID 种类数判收发。记在这里，免得再犯。
+
+    - **正确姿势（SDK 侧给出，已核对固件源码）**：驱动中的位置/速度用 `jsdk_joint_request_state(j, JSDK_STATE_POS_VEL)`（即 `QUERY_POS_VEL` 0x41，**发出即返回、不与 tick 互斥**）：在 `cycle_end` 之后发、下一次 `cycle_begin` 收帧回填缓存（典型延迟 1–2 个 tick）；**≤10 Hz/关节**；⚠ 0x41/0x44 **不喂设备看门狗** ⇒ 只能**额外**发，不能顶替控制帧；判据用 `age_ms`（它不重发、不排队）。
+      ➡ 由此：本节早前"需要 SDK 提供非阻塞读路径"的需求**撤回**（SDK 早已具备，是我们没找到）；`endpoint_poll_ms` 那套"失能后读端点"的绕法**退居交叉核对**用，不再当主路径。
       如实告知；要真值就先把关节失能（这就是 `endpoint_poll_ms` 的适用场景）。
       （SDK 侧非阻塞读，或把读端点排进 tick 的空隙）。
 
