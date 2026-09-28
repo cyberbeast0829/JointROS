@@ -35,7 +35,7 @@ inline constexpr unsigned kJointNameLen    = 64u;
 inline constexpr unsigned kBusNameLen      = 32u;
 inline constexpr unsigned kChannelLen      = 128u;
 inline constexpr unsigned kPathLen         = 192u;
-inline constexpr unsigned kNotesLen        = 640u;
+inline constexpr unsigned kNotesLen        = 2048u;
 
 /** 协议硬限制：广播位图只能寻址 node_id 1..7（见 DESIGN §2.2）。 */
 inline constexpr std::uint8_t kMaxBroadcastNodeId = 7u;
@@ -279,7 +279,9 @@ struct BusCfg {
     std::uint32_t  poll_period_ms = 10u;  /**< ↔ SDK 的 unicast_poll 周期（0 = 不轮询）。
                                                ⚠ 与 `feedback_poll_ms` **不是**一回事（后者是我们
                                                自己去读端点），见 `jr_config_yaml.hpp`。 */
-    /** F11：端点轮询周期（ms，0 = 关闭）。由 `jr.feedback.endpoint_poll_ms` 下发到每条总线。 */
+    /** F11：端点轮询周期（ms，0 = 关闭）。由 `jr.feedback.endpoint_poll_ms` 下发到每条总线。
+     *  ⚠ **已废弃（v0.20）**：改用 `state_request_ms`（`QUERY_POS_VEL` 0x41）—— 同样不需要
+     *  独占窗口、驱动中也能用。端点轮询保留仅用于"待机时交叉核对"；置非 0 时加载会告警。 */
     std::uint32_t  feedback_poll_ms = 0u;
     /** F31：非阻塞状态请求周期（ms，0 = 关闭）。由 `jr.feedback.state_request_ms` 下发。 */
     std::uint32_t  state_request_ms = 0u;
@@ -359,7 +361,11 @@ struct ConfigNotes {
     bool rt_disabled = false;                  /**< rt.enabled == false */
     bool has_non_mit_joint = false;            /**< 有关节配了非 MIT 模式（命令面要改用 ~/cmd） */
     bool has_current_mode_joint = false;        /**< 有 CURRENT 模式关节（F19：不喂设备看门狗） */
-    char text[kNotesLen] = {};                 /**< 逐行可读提示（追加式） */
+    /** 逐行可读提示的容量（追加式）。
+     *  ⚠ 满了以后 `append_note()` 会写一个截断标记（不再静默丢弃）。
+     *  历史：原为 640，被一条新增告警挤爆，把 `node_id>7` 的提示整个吞了
+     *  （由 `test_config` 的 notes 用例当场抓到 —— 用例的价值就在这）。 */
+    char text[kNotesLen] = {};
 };
 
 /** 平台相关的默认值（SocketCAN vs PCAN），其余字段走结构体默认。 */

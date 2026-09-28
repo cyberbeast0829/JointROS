@@ -43,7 +43,7 @@ struct NodeCfg {
      *  ⚠ 只在**本条总线上所有关节都失能**时才轮询：读参数要进安全暂停窗口，而
      *  `TickGroup::pause()` 的语义是**先安全失能**（见 "rt/jr_ops.hpp" 注释）——
      *  拿它做 10 Hz 轮询会变成每秒失能/使能十次。在动的关节不会因为开了这个键被打断。 */
-    std::uint32_t endpoint_poll_ms = 0u;
+    std::uint32_t endpoint_poll_ms = 0u;   /* DEPRECATED (v0.20)：用 state_request_ms 取代 */
 
     /** F31：**非阻塞状态请求**周期（ms；0 = 关闭，默认）。
      *

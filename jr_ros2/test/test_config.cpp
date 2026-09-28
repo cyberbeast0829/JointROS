@@ -193,6 +193,7 @@ void test_notes()
     c.buses[0].serial_baud = 115200u;
     c.rt.enabled = false;                   /* RT 关闭告警 */
     c.command.timeout_ms = 0u;              /* 命令超时关闭告警 */
+    c.buses[0].feedback_poll_ms = 100u;     /* F11 端点轮询：已废弃，必须告警（不拒绝） */
 
     ConfigNotes notes;
     const Result r = validate_config(c, &notes);
@@ -202,6 +203,9 @@ void test_notes()
     JR_CHECK(notes.has_slcan_bus);
     JR_CHECK(notes.command_timeout_disabled);
     JR_CHECK(notes.rt_disabled);
+    /* 废弃告警必须出现，而且必须点名取代它的键（否则用户不知道改用哪个） */
+    JR_CHECK_CONTAINS(notes.text, "DEPRECATED");
+    JR_CHECK_CONTAINS(notes.text, "state_request_ms");
     std::printf("  notes:%s\n", notes.text);
     JR_CHECK_CONTAINS(notes.text, "bitmap");
     JR_CHECK_CONTAINS(notes.text, "CAN FD");

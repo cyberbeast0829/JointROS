@@ -355,6 +355,15 @@ void test_validate_integration()
     JR_CHECK_EQ(rep.notes.has_joint_above_broadcast_id, true);
     JR_CHECK_CONTAINS(rep.notes.text, "bitmap");
 
+    /* F11 的端点轮询已废弃（v0.20）：① 旧配置**仍然能加载**（不破兼容）；
+       ② 必须给出点名取代键的告警，否则用户不知道该换成什么。 */
+    const std::string legacy = base + "\n  feedback:\n    endpoint_poll_ms: 500\n";
+    const Status st_legacy = parse_config_yaml(legacy.c_str(), "legacy-poll", &cfg, &r, &rep);
+    JR_CHECK_MSG(st_legacy == Status::kOk, r.message);
+    JR_CHECK_EQ(cfg.buses[0].feedback_poll_ms, 500u);
+    JR_CHECK_CONTAINS(rep.notes.text, "DEPRECATED");
+    JR_CHECK_CONTAINS(rep.notes.text, "state_request_ms");
+
     /* 同一总线上两个关节用同一个 node_id → validate_config 必须拒绝加载。 */
     const std::string dup =
         variant(base, "    - {name: j0, bus: can0, node_id: 1}\n",

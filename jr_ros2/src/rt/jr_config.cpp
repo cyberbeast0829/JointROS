@@ -16,11 +16,23 @@
 namespace jr {
 namespace {
 
+/* 装不下时的可见标记：静默丢弃会让"后面的告警"人间蒸发（真被测试抓到过）。 */
+static const char kNotesTruncated[] = "\n[warn] (notes truncated)";
+
 void append_note(ConfigNotes *notes, const char *fmt, ...) noexcept
 {
     if (notes == nullptr) return;
     const std::size_t used = std::strlen(notes->text);
     if (used + 2u >= sizeof(notes->text)) return;
+    if (used + sizeof(kNotesTruncated) >= sizeof(notes->text)) {
+        if (std::strstr(notes->text, kNotesTruncated) == nullptr) {
+            const std::size_t room = sizeof(notes->text) - 1u - used;
+            if (room >= sizeof(kNotesTruncated)) {
+                std::memcpy(notes->text + used, kNotesTruncated, sizeof(kNotesTruncated));
+            }
+        }
+        return;
+    }
 
     /* 每条提示独立一行：换行 + 内容（截断由 vsnprintf 保证，且不再写越界）。 */
     const std::size_t remain = sizeof(notes->text) - used;
@@ -255,6 +267,16 @@ Result validate_config(const Config &cfg, ConfigNotes *notes) noexcept
                             "Classic. Configuration/monitoring only, NOT for high-rate control.",
                             bus.name);
             }
+        }
+
+        /* F11 的"端点轮询"**已废弃**（v0.20）：改用 `jr.feedback.state_request_ms`
+           （`QUERY_POS_VEL` 0x41）—— 同样不需要独占窗口、**驱动中也能用**，且已真机验证。
+           这里只告警不拒绍：端点读仍然是"待机时交叉核对绝对真值"的合法手段。 */
+        if (bus.feedback_poll_ms > 0u && notes != nullptr) {
+            append_note(notes,
+                        "[warn] bus '%s': feedback.endpoint_poll_ms is DEPRECATED - use "
+                        "feedback.state_request_ms (0x41) instead",
+                        bus.name);
         }
 
         const bool uses_heartbeat = (bus.feedback == FeedbackPolicy::kBroadcastHeartbeat) ||

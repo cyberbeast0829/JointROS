@@ -543,9 +543,11 @@ void JrBusServices::create()
             poll_paths_ok_ = true;
             tmr_poll_ = node->create_wall_timer(
                 std::chrono::milliseconds(poll_ms), [this]() { poll_feedback(); }, cbg);
-            RCLCPP_INFO(node->get_logger(),
-                        "endpoint polling: %u ms on '%s'/'%s' (only while every joint on this bus is "
-                        "disabled; the safe pause window would disable them otherwise)",
+            RCLCPP_WARN(node->get_logger(),
+                        "endpoint polling is DEPRECATED (v0.20): %u ms on '%s'/'%s' — prefer "
+                        "jr.feedback.state_request_ms (QUERY_POS_VEL 0x41): no exclusive window, "
+                        "works while driving. Endpoint polling stays supported for idle cross-checks "
+                        "(it only runs while every joint on this bus is disabled)",
                         poll_ms, kPollPathPos, kPollPathVel);
         } else {
             poll_paths_ok_ = false;
