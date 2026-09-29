@@ -131,8 +131,9 @@ private:
      *  表面现象是"轨迹命令下去了但关节不动/不跟"（很难查）。
      *
      *  取值来源：YAML 的 `limits.<joint>.stiffness/damping`（SI，N·m/rad）。
-     *   `gain_mode=si` → 直接用；`gain_mode=wire` → 按 `kp = K·2π/gear_ratio` 换算
-     *   （与 `BusRuntime::hold_all` 同一个公式，避免两套换算）。
+     *  ⚠ v0.21：**不做任何齿比换算** —— 协议里 `kp` 就是输出端刚度（`K_out = kp`），
+     *  SDK 的 `jsdk_units_stiffness_to_kp()` 已是恒等（真机判定实验见 SDK 7aa76ca）。
+     *  因此 `gain_mode=si` 与 `wire` 数值相同；老文档里的 `kp = K·2π/gear_ratio` 是错的。
      *  并按**设备量程** `mit_max_kp/kd` 夹紧（否则 SDK 会因越界拒绝目标），
      *  夹紧时日志里说清楚。 */
     void apply_default_gains();

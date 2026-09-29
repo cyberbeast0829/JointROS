@@ -16,6 +16,13 @@ uint32 link_errors
 uint32 last_rx_age_ms           # 距上次收到任何帧
 uint32 hal_bus_flags            # HAL 状态位（listen-only / error-passive / bus-off 等）
 
+# ── 状态轮询观测（F31；`jr.feedback.state_request_ms` 关闭时恒为 0）──────
+# ⚠ 单位是**帧数**：POS_VEL|CURRENT 一次轮询 = 2 帧。
+#   `state_ok / state_sent` 低 ⇒ 总线被控制帧挤满或链路丢帧；`state_timeout` > 0 ⇒ 设备没答。
+uint32 state_sent
+uint32 state_ok
+uint32 state_timeout
+
 float32 bus_load_estimate       # 0..1+：按 §7.1 模型**估计**（是估计值，不是测量值）
 uint64 tick_overruns            # 丢 tick 次数（实时性健康度）
 uint64 command_overwrites       # 命令在 RT 取走前被覆盖的次数

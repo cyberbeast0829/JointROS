@@ -784,6 +784,12 @@ void JrBusNode::fill_bus_status(const StateSnapshot &snap, jr_interfaces::msg::B
     out->link_errors = b.link_errors;
     out->last_rx_age_ms = b.last_rx_age_ms;
     out->hal_bus_flags = b.hal_bus_flags;
+    /* F31：状态轮询的观测计数（帧数）。**以前这里漏拷** ⇒ 消息里永远是 0，
+       而"计数恒 0"看起来就像"SDK 一帧都没发" —— 我据此白查了两轮（见提交信息）。
+       ⚠ 这一类"POD 加了字段但消息没填"的漏拷贝没有任何编译错误，只能靠对拍真实值发现。 */
+    out->state_sent = b.state_sent;
+    out->state_ok = b.state_ok;
+    out->state_timeout = b.state_timeout;
     out->bus_load_estimate = static_cast<float>(b.bus_load_estimate);
     out->tick_overruns = snap.rt.missed_ticks;
     out->command_overwrites = snap.rt.command_overwrites;

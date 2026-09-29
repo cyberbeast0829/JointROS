@@ -356,11 +356,16 @@ public:
 
     /* ===================== F31：非阻塞状态请求（0x41） ===================== */
 
-    /** 该不该现在发一次状态请求（**纯函数**，单测钉住限速边界）。
-     *  `period_ms == 0` ⇒ 永不发；`last_ns == 0` ⇒ 首次立即发（待机时尽快拿到新鲜值）；
-     *  `now < last`（时间倒退）⇒ 不发（避免疯狂重发把总线灌满）。 */
-    static bool state_request_due(std::uint64_t now_ns, std::uint64_t last_ns,
-                                  unsigned period_ms) noexcept;
+    /** 交轮询调度给 **SDK 自己**（阶段 2 的限速器）—— 在本条总线 `configure()` 成功后调。
+     *  SDk 保证：每总线**最多一个在途请求**（真正的限速）、按 node_id 升序轮转、
+     *  在途超时即失效（不拿旧值冒充当前值）、发帧在 `cycle_end()`、结超时在 `cycle_begin()`
+     *  ⇒ **同一个 tick 内就能看到 valid=1**（我们自己在 tick_end 里发就做不到这一点）。
+     *  `period_ms == 0` ⇒ 不调（保持 SDK 默认关闭）。 */
+    Status set_state_poll(std::uint32_t period_ms, Result *res) noexcept;
+
+    /** 新鲜度阈值（ms）：`age_ms > 阈值` = 陈旧。由 SDK 公开（`max(50, 心跳×3, 控制周期×6, 轮询×4)`）。
+     *  ⚠ 这是判新鲜的**唯一可靠依据**：`FEEDBACK_STALE` 位在真机上是**粘滞**的。 */
+    std::uint32_t stale_zero_baseline() noexcept;
 
     void fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept;
 
@@ -513,8 +518,8 @@ private:
     };
     PolledPV polled_[kMaxJointsPerBus] = {};
 
-    /** F31：上次发出状态请求的时刻（0 = 从未发过 ⇒ 首次立即发）。 */
-    std::uint64_t last_state_req_ns_ = 0u;
+    /** F31：新鲜度阈值缓存（0 = 还没取到）。 */
+    std::uint32_t stale_ms_ = 0u;
     char        snapshot_note_[160] = {};
 };
 

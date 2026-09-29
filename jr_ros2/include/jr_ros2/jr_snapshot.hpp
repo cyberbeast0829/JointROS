@@ -69,6 +69,11 @@ struct BusStatsPOD {
     std::uint32_t link_errors = 0u;
     std::uint32_t last_rx_age_ms = 0u;
     std::uint32_t hal_bus_flags = 0u;
+    /** F31：SDK 侧状态轮询的观测计数（帧数；`POS_VEL|CURRENT` 一次轮询 = 2 帧）。
+     *  `ok / sent` 低 ⇒ 总线被控制帧挤满或链路丢帧；`timeout` > 0 ⇒ 设备没答。 */
+    std::uint32_t state_sent = 0u;
+    std::uint32_t state_ok = 0u;
+    std::uint32_t state_timeout = 0u;
     std::uint8_t  nodes_online = 0u;
     double        bus_load_estimate = 0.0; /**< 0..1+（按 bus_plan 模型估计，**声明为估计值**） */
     char          last_note[160] = {};     /**< 最近一次需要让人看到的文本（如广播降级原因） */

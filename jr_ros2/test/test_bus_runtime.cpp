@@ -868,23 +868,6 @@ void test_feedback_age_is_honest()
     JR_CHECK_EQ(feedback_age_ms(kJan, 0u, true, kFeedbackAgeUnknown), kFeedbackAgeUnknown);
 }
 
-/* F31：状态请求的限速判定（纯函数）。 */
-static void test_state_request_due()
-{
-    JR_CASE("状态请求限速：0 = 关，节奏不能比周期密");
-    constexpr std::uint64_t kMs = 1000000ull;
-
-    /* 关闭 ⇒ 永不发 */
-    JR_CHECK(!rt::BusRuntime::state_request_due(1000ull * kMs, 0u, 0u));
-    /* 首次（last=0）⇒ 立即发，让待机时尽快拿到新鲜值 */
-    JR_CHECK(rt::BusRuntime::state_request_due(1000ull * kMs, 0u, 100u));
-    /* 未到周期 ⇒ 不发；刚好到 ⇒ 发 */
-    JR_CHECK(!rt::BusRuntime::state_request_due(1050ull * kMs, 1000ull * kMs, 100u));
-    JR_CHECK(rt::BusRuntime::state_request_due(1100ull * kMs, 1000ull * kMs, 100u));
-    /* 时间倒退（不该发生）⇒ 不发，免得疯狂重发把总线灌满 */
-    JR_CHECK(!rt::BusRuntime::state_request_due(900ull * kMs, 1000ull * kMs, 100u));
-}
-
 /**
  * ⚠ F7（真机发现）：锁的键必须是**物理通道**，不是总线名。
  *
@@ -1002,6 +985,5 @@ int main()
     test_feedback_age_is_honest();
     test_lock_key_follows_channel();
     test_polled_usable_is_honest();
-    test_state_request_due();
     return jrtest::report();
 }

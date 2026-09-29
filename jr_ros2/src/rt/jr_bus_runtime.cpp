@@ -700,6 +700,21 @@ Status BusRuntime::configure(BusReport *rep, Result *res) noexcept
     }
 
     /* ---- ③ configure()（握手 + 量程读回 + 必要的看门狗协商） ---- */
+    /* F31：状态轮询必须在 `configure()` **之前**配好。真机实测：放在 configure 之后调
+       （`ctx->now_ms` 还是 0，而 configure 会重设时钟/节拍）⇒ **一帧都不发**、
+       `state_sent` 恒 0，但 `age_ms` 看起来还正常（心跳在喂）——非常容易误判成"已生效"。
+       同一份代码在 Python 侧（configure 前调）`state_sent/state_ok` 正常增长，就是这个差别。 */
+    if (bus_.state_request_ms > 0u) {
+        const jsdk_status_t pst = jsdk_context_set_state_poll(ctx_, bus_.state_request_ms, 1u, 0u, 0u);
+        if (pst == JSDK_OK) {
+            note_append("[info] state poll: SDK-side every %u ms (POS_VEL|CURRENT, 1 per cycle)",
+                        bus_.state_request_ms);
+        } else {
+            note_append("[warn] state poll: set_state_poll failed (%s) — feedback source unchanged",
+                        jsdk_status_string(pst));
+        }
+    }
+
     jsdk_status_t cst = JSDK_ERR_TIMEOUT;
     unsigned attempt = 0u;
     for (attempt = 0u; attempt < bus_.desc.retries; ++attempt) {
@@ -1657,16 +1672,14 @@ bool BusRuntime::try_broadcast_mit() noexcept
         targets[j].vel_rad_s = t.velocity;
         targets[j].tau_Nm = t.torque;
         if (t.si_gain) {
-            /* 广播路径 SDK 只收线上 kp/kd：与 set_mit_stiffness 同一换算。 */
-            const double gear = report_.joint[j].gear_ratio;
-            if (gear <= 0.0) {
-                set_note("broadcast degraded to unicast: joint is not calibrated, cannot convert "
-                         "stiffness/damping to wire kp/kd");
-                return false;
-            }
-            const double k = 2.0 * 3.14159265358979323846 / gear;
-            targets[j].kp = t.stiffness * k;
-            targets[j].kd = t.damping * k;
+            /* ⚠ v0.21 修正（SDK 7aa76ca 真机实测定案）：**不再做任何换算**。
+               协议里 kp 本来就是输出端刚度（`K_out = kp`，不被 gear_ratio 缩放）；
+               SDK 的 `jsdk_units_stiffness_to_kp()` 也改成了恒等。我们以前这里乘
+               `2π/gear` ⇒ 客户给的刚度被**缩小 gear/2π 倍**（gear=7.75 时只有 1/8），
+               单播路径（`set_mit_stiffness`，SDK 内部恒等）与广播路径**不一致**。
+               现在两条路径同值。 */
+            targets[j].kp = t.stiffness;
+            targets[j].kd = t.damping;
         } else {
             targets[j].kp = t.kp;
             targets[j].kd = t.kd;
@@ -1688,7 +1701,7 @@ void BusRuntime::set_note(const char *text) noexcept
     std::snprintf(snapshot_note_, sizeof(snapshot_note_), "%s", text != nullptr ? text : "");
 }
 
-void BusRuntime::tick_end(std::uint64_t now_ns_in) noexcept
+void BusRuntime::tick_end(std::uint64_t /*now_ns_in*/) noexcept
 {
     if (ctx_ == nullptr) return;
     const jsdk_status_t st = jsdk_context_cycle_end(ctx_);
@@ -1696,17 +1709,14 @@ void BusRuntime::tick_end(std::uint64_t now_ns_in) noexcept
         last_cycle_status_ = static_cast<int>(st);
     }
 
-    /* F31：非阻塞状态请求（QUERY_POS_VEL 0x41）。
-       时序按 SDK 头文件推荐的做法：**在 `cycle_end()` 之后**发请求，应答由下一次
-       `cycle_begin()` 的收帧路径解码并回填到反馈缓存（典型延迟 1–2 个 tick）。
-       ⚠ 0x41 **不喂设备看门狗** ⇒ 这只是"额外"的查询帧，控制帧照发不误。
-       ⚠ 它在 RT 路径上，只做一次 HAL 写（≤2 帧总线时间）—— 不做重发、不排队、不等应答。 */
-    if (state_request_due(now_ns_in, last_state_req_ns_, bus_.state_request_ms)) {
-        last_state_req_ns_ = now_ns_in;
-        for (unsigned j = 0u; j < joint_count_; ++j) {
-            (void)jsdk_joint_request_state(joints_[j], JSDK_STATE_POS_VEL);
-        }
-    }
+    /* F31：状态请求的**发送与限速**已交给 SDK（`jsdk_context_set_state_poll()`，阶段 2）：
+       SDK 在 `cycle_end()` 里按周期发、在下一个 `cycle_begin()` 的收帧路径里把应答回填
+       ⇒ “请求→应答→回填”落在**同一个 tick** 内。我们自己在这里发是做不到这一点的
+       （真机症状：`valid` 在下一次 `cycle_begin()` 被清零 ⇒ 永远看不到 `valid=1`）。
+       ⚠ 轮询帧**不喂设备看门狗** ⇒ 控制帧照发不误。
+       ⚠ 周期由 `BusRuntime::configure()` 在 `jsdk_context_configure()` **之前**调
+          `jsdk_context_set_state_poll()` 一次性配好，热路径不做决定。
+       （这段刻意留空 = 明确宣告“这里**不再**自己发帧”，免得后人又加回一份。） */
 }
 
 void BusRuntime::estop_now() noexcept
@@ -1748,19 +1758,11 @@ void BusRuntime::hold_all(double stiffness_nm_per_rad, double damping_nm_s_per_r
             jsdk_joint_hold_position(joints_[j]);
             continue;
         }
-        /* ⚠ SDK 的 `hold_position_pd()` 接的是**线上 kp/kd**（作用在电机端 turns 误差上），
-           而客户给的是输出端物理量。换算与 `set_mit_stiffness()` 同一公式：
-               线上值 = 物理量 × 2π / gear_ratio
-           取不到 gear_ratio（未标定）时**不下发 PD**，退化为 hold_position ——
-           宁可不抱持，也不拿一个猜出来的刚度去驱动电机。 */
-        const double gear = report_.joint[j].gear_ratio;
-        if (gear <= 0.0) {
-            jsdk_joint_hold_position(joints_[j]);
-            continue;
-        }
-        const double k = 2.0 * 3.14159265358979323846 / gear;
-        jsdk_joint_hold_position_pd(joints_[j], stiffness_nm_per_rad * k,
-                                    damping_nm_s_per_rad * k);
+        /* ⚠ v0.21：`hold_position_pd()` 收的也是**输出端刚度/阻尼**（SDK 内部恒等，
+           见 `jsdk_units_stiffness_to_kp()` 的注释：`K_out = kp`）⇒ 这里**不换算**。
+           以前乘 `2π/gear` 会把这个"保持"软 gear/2π 倍，而且因为要查 gear 而在
+           未标定时直接放弃抱持 —— 两件都不必要了。 */
+        jsdk_joint_hold_position_pd(joints_[j], stiffness_nm_per_rad, damping_nm_s_per_rad);
     }
 }
 
@@ -1851,13 +1853,34 @@ bool BusRuntime::has_polled(unsigned joint_index) const noexcept
     return polled_[joint_index].valid.load(std::memory_order_acquire) != 0u;
 }
 
-bool BusRuntime::state_request_due(std::uint64_t now_ns, std::uint64_t last_ns,
-                                   unsigned period_ms) noexcept
+std::uint32_t BusRuntime::stale_zero_baseline() noexcept
 {
-    if (period_ms == 0u) return false;        /* 功能关闭 */
-    if (last_ns == 0u) return true;           /* 首次：立即发（待机时尽快拿到新鲜值） */
-    if (now_ns < last_ns) return false;       /* 时间倒退（不该发生）⇒ 宁可不发 */
-    return (now_ns - last_ns) >= static_cast<std::uint64_t>(period_ms) * 1000000ull;
+    /* SDK 的 `jsdk_joint_get_stale_ms()` 是 `const`、可在 RT 路径调（头文件原话）。
+       缓存一次（它只在 configure 后才有意义），避免每个 tick 都调一次。 */
+    if (stale_ms_ == 0u && ctx_ != nullptr && joint_count_ > 0u) {
+        stale_ms_ = jsdk_joint_get_stale_ms(joints_[0]);
+    }
+    return stale_ms_;
+}
+
+Status BusRuntime::set_state_poll(std::uint32_t period_ms, Result *res) noexcept
+{
+    if (ctx_ == nullptr) {
+        if (res != nullptr) res->set(Status::kInvalidState, Advice::kNone, "set_state_poll before open");
+        return Status::kInvalidState;
+    }
+    /* `fields = 0` ⇒ 两个都轮询（POS_VEL|CURRENT）；`per_cycle = 1`（每 tick 预算 1 个）；
+       `timeout_ms = 0` ⇒ SDK 默认 50 ms。 ⚠ 轮询帧**不喂设备看门狗**，只是额外发。 */
+    const jsdk_status_t st = jsdk_context_set_state_poll(ctx_, period_ms, 1u, 0u, 0u);
+    if (st != JSDK_OK) {
+        if (res != nullptr) {
+            res->set(Status::kInternal, Advice::kCheckBusConfig,
+                     "jsdk_context_set_state_poll failed");
+        }
+        return map_status(st);
+    }
+    stale_ms_ = 0u;   /* 阈值依赖轮询周期 ⇒ 重新取一次 */
+    return Status::kOk;
 }
 
 void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned joint_base) noexcept
@@ -1878,6 +1901,9 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
         b.link_errors = bs.link_errors;
         b.last_rx_age_ms = bs.last_rx_age_ms;
         b.hal_bus_flags = bs.hal_bus_flags;
+        b.state_sent = bs.state_sent;
+        b.state_ok = bs.state_ok;
+        b.state_timeout = bs.state_timeout;
         b.nodes_online = bs.nodes_online;
     }
     BusStatsPOD &b = s.buses[bus_index];

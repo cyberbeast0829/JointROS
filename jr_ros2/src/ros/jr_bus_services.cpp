@@ -514,21 +514,17 @@ void JrBusServices::create()
 
     RCLCPP_INFO(node->get_logger(), "services up (19): motion/lifecycle + params/descriptor/diagnostics");
 
-    /* ======================================================================
-     * F11：端点轮询（可选反馈源）
-     * ----------------------------------------------------------------------
-     *  先确认端点真的在描述符里，再开定时器 —— 路径猜错就变成一个
-     *  每 100 ms 报一次错的噪声源。对不上的时候宁可不开，并说清楚为什么。
-     * ==================================================================== */
-    /* F31：非阻塞状态请求（QUERY_POS_VEL 0x41）。在 tick 的 cycle_end() 之后发、**不与 tick 互斥**
-       ⇒ 驱动中也能拿到新鲜位置/速度（0x41 的应答由 SDK 回填到反馈缓存）。
-       ⚠ 0x41 **不喂设备看门狗**（SDK 头文件原话）⇒ 它只是"额外"的查询帧，控制帧必须照发。 */
+    /* F31：状态轮询的配置已经在 `BusRuntime::configure()` 里做完了（**必须在
+       `jsdk_context_configure()` 之前**：真机上放在之后调，SDK 侧一帧都不发、
+       `state_sent` 恒 0，而 `age_ms` 看着还正常 ⇒ 极易误判成已生效）。
+       这里只把结果告诉用户，包括 SDK 公开的新鲜度阈值（`age_ms > 阈值` = 陈旧）。
+       ⚠ 0x41 **不喂设备看门狗**（SDK 头文件原话）⇒ 只是额外帧，控制帧必须照发。 */
     if (bus_cfg().state_request_ms > 0u) {
         RCLCPP_INFO(node->get_logger(),
-                    "state request: QUERY_POS_VEL (0x41) every %u ms per joint — non-blocking, sent "
-                    "after cycle_end(). It does NOT feed the device watchdog, so control frames must "
-                    "keep flowing (SDK recommends <=10 Hz per joint)",
-                    bus_cfg().state_request_ms);
+                    "state poll: SDK-side, every %u ms per joint (POS_VEL|CURRENT, 1 per cycle) — "
+                    "freshness threshold %u ms (age_ms > threshold = stale); it does NOT feed "
+                    "the device watchdog",
+                    bus_cfg().state_request_ms, bus().stale_zero_baseline());
     }
 
     const unsigned poll_ms = bus_cfg().feedback_poll_ms;

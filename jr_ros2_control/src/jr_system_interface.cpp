@@ -293,7 +293,6 @@ void JrSystemInterface::set_command_for_test(unsigned i, double position, double
 
 void JrSystemInterface::apply_default_gains()
 {
-    const double two_pi = 6.283185307179586;
     for (std::size_t i = 0u; i < joint_index_.size(); ++i) {
         const unsigned g = joint_index_[i];
 
@@ -318,20 +317,11 @@ void JrSystemInterface::apply_default_gains()
         }
 
         const jr::rt::JointInfoPOD &info = tg_->bus(bus).report().joint[local];
+        /* F31/v0.21：`gain_mode=si` 与 `wire` 现在**数值相同**（协议里 kp 就是输出端刚度，
+           SDK 的 `jsdk_units_stiffness_to_kp()` 已改为恒等，见 SDK 7aa76ca 的真机判定实验）
+           ⇒ 不再需要 gear_ratio、也不再因为未标定而放弃默认增益。 */
         double a = jc.stiffness;
         double b = jc.damping;
-        if (!gain_si_) {
-            if (info.gear_ratio <= 0.0) {
-                RCLCPP_WARN(logger_,
-                            "joint '%s': cannot convert the SI default stiffness/damping to wire "
-                            "gains (gear_ratio=%.3f) - the defaults are ignored; write kp/kd from the "
-                            "controller instead",
-                            joint_name_[g].c_str(), info.gear_ratio);
-                continue;
-            }
-            a = jc.stiffness * two_pi / info.gear_ratio;
-            b = jc.damping * two_pi / info.gear_ratio;
-        }
 
         /* 按设备量程夹紧：MIT 目标越界会被 SDK 拒绝（除非 clamp_target），
            与其让客户看到"部分帧被拒"，不如一开始就给合法值并告诉它被夹了。 */
