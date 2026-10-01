@@ -449,6 +449,24 @@ void TickGroup::thread_main() noexcept
         }
         if (paused) {
             if (!pause_release_.load(std::memory_order_acquire)) continue;   /* 不碰 context */
+
+            /* ⚠⚠ 暂停区间必须**一次性**记账，然后重置时间基准。
+             *
+             * 踩过的坑（现场实测）：以前只 `continue` ⇒ `tick_index_` 停住、
+             * 而 `deadline_of()` 是累积的 ⇒ 恢复后**每一拍**都比"累积 deadline"迟到，
+             * 迟到量 ≈ 整个暂停时长 ⇒ 每拍都 `missed_ticks_ += 暂停时长/周期`。
+             * 实测：`pause()` 停 200 ms → 恢复后增量 20,706（期望的 103 倍）；
+             * 真机 jog 2 s → 2,050,096。而暂停期间又完全**不记账**（漏报，也错）。
+             *
+             * 正确语义：暂停期间确实没跑控制周期 ⇒ 按"少跑了多少拍"计一次，
+             * 然后把基准对齐到此刻，恢复无漂移节奏。 */
+            const std::uint64_t t_resume = now_ns();
+            const std::uint64_t since_last = (t_resume > t_start) ? (t_resume - t_start) : 0u;
+            if (since_last > period_ns_) {
+                missed_ticks_ += since_last / period_ns_;
+            }
+            sleeper.reset_epoch(t_resume);
+
             leave_pause();
             paused = false;
             pause_ready_.store(false, std::memory_order_release);

@@ -2038,6 +2038,80 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
       **数值语义变了**：以前按 A 解释、现在按 N·m 解释，客户要按物理量重新填）。
     - 说明：本次**未做真机验证**（`torque_limit` 只影响 CSP/CSV/CURRENT 路径，
       而现场一直用 MIT；改动的正确性由编译 + 离线用例 + SDK 侧真机证据支撑）。
+58. **kp 刚度判定实验（真机，v0.22 收口）—— 我们下发的 kp 就是输出端刚度**：
+
+    背景：SDK 两个提交互相推翻（`fc17ea4` 主张 `K_out = kp/gear`，随后 `7aa76ca` 撤回并给出
+    真机判定）。我们自己此前乘了 `2π/gear`，所以必须**独立复现**这个判定，不能只信上游结论。
+
+    方法（不依赖源码解读）：静态平衡 `K_out·e = -tau_ff` ⇒ `d(e)/d(tau_ff) = 1/K_out`。
+    在 `can0`（CAN FD 1M/5M）上，令目标 0 rad、`kp=60`、`kd=2.0`，扫 `tau_ff`：
+
+    | `tau_ff` (N·m) | 反馈 pos (rad) | 相对 0 的位移 (rad) |
+    |---|---|---|
+    | 0.0 | 0.00130 | — |
+    | 1.0 | 0.01614 | +0.01485 |
+    | −1.0 | −0.01581 | −0.01711 |
+    | 2.0 | 0.03267 | +0.03138 |
+    | −2.0 | −0.02813 | −0.02943 |
+    | 3.0 | 0.04962 | +0.04832 |
+
+    ⇒ 斜率 **≈ 0.0163 rad/(N·m)** ⇒ `K_out ≈ 61 N·m/rad`、`kp = 60` ⇒ **`K_out/kp ≈ 1.02`**。
+    若仍按 `2π/gear` 换算，斜率应为 **0.135**（大 **8.1 倍**；gear=7.75）——
+    实测相差 8.3 倍，**旧行为被明确排除**。与 SDK 侧在 fw 1546 上的三组测量
+    （`K/kp = 1.019 / 1.000 / 1.008 / 1.008`）在 2% 以内一致。
+
+    ⇒ 结论：`kp` 即输出端刚度，**任何齿比换算都是错的**（三处已清，见 §14 v0.22）。
+    ⚠ 本次实验同时说明一件现场事实：**`tau_ff` 会给关节带来持续偏移**（`tau/kp`），
+    所以"零力矩前馈"只应在外力补偿等确有需要的场合使用。
+
+59. **`tick_overruns` 在暂停窗口里被重复累加（v0.22 收口）—— 一个"仪表在撒谎"的计数 bug**：
+
+    现象（真机 `can0`，jog 之后看 `jr_ctl status`）：`tick_overruns` 与暂停窗口时长
+    **超线性**增长，而拨到 1 kHz 折算只应是几百：
+
+    | jog 窗口 | `tick_overruns` 增量 | 按 1 kHz 折算的期望 |
+    |---|---|---|
+    | 0.5 s | 132 879 | 500 |
+    | 1.0 s | 519 093 | 1 000 |
+    | 2.0 s | 2 050 096 | 2 000 |
+    | 纯待机 2 s（不暂停） | **0** | 0 |
+
+    ⚠ 注意"期望值"那一列只是**数量级参照**，不是判据（见下"为什么只判上界"）。
+
+    **机制**（`jr_tick_group.cpp`）：`deadline = sleeper.deadline_of(tick_index_)` 是
+    **累积**的（`start + n*period`），而暂停分支只 `continue` ——
+    **既不推进 `tick_index_`、也不重算基准**。于是：
+    - 暂停期间：`jitter = 0`（`t_start < deadline`，第一拍还没到过）⇒ **完全不记账**（漏报）；
+    - 恢复之后：每一拍都拿"累积到该拍的 deadline"去比"当前时间"，
+      `t_start - deadline` ≈ **整个暂停时长**，并且**每一拍都重复量到它**
+      ⇒ `missed_ticks_ += 暂停时长/周期` 每拍加一次（次数 ≈ 暂停期间循环圈数）。
+
+    实测拆分（`jr_ros2/test/test_tick_overruns.cpp`，Windows）：
+    `pause()` 后停 200 ms ⇒ 增量 **0**（暂停期间确实不记账）；
+    `pause()` → 200 ms → `resume()` ⇒ 增量 **20 706** = 期望的 **103 倍**。
+
+    **修法**（两个改动，都很小）：
+    ① `Sleeper::reset_epoch(now)` —— 把时间基准重新对齐到此刻；
+    ② 恢复分支里**一次性结清**暂停区间（`since_last/period` 只加一次），
+       然后 `reset_epoch()`。
+    ⇒ 语义回到"RT 环路迟到了多少拍"，也就是操作员看到这个数时会以为它一直是这个意思。
+    修复后真机同一组测量：**132 879 / 519 093 / 2 050 096 → 0 / 0 / 0**。
+
+    **为什么只判上界，不判下界**：结算发生在**恢复后的第一次迭代**，而"第一次迭代何时
+    发生"随平台而变 —— Linux `clock_nanosleep` 按绝对时刻唤醒（`pause()` 前的 deadline
+    早已过期 ⇒ 恢复后第一拍立刻结算，增量落在 `pause()` 内部，测试读到时是 0）；
+    Windows `SetWaitableTimer` + `Sleep()` 恰好跨过下一拍（结算发生在 `pause()` 返回后，
+    实测 233）。两者都符合"窗口只计一次"，所以下界取 0、上界卡在 1.5×窗口 ——
+    这才是重复累加会撞穿的地方（修前 103 倍）。
+    ⚠ 该用例**必须同时有上下界语境**：只判"小于 100"会漏掉恢复路径，只判"接近窗口"
+    会在 Linux 上假红。
+
+    **顺带澄清两条此前的错误归因**（都写进了提交前必须纠正的记录）：
+    - **不是 CAN FD 带宽**：对照实验里使能 + 轮询 100 ms 的 10 s 增量是 **0**，
+      负载也远未打满 ⇒ 与"总线饱和"无关；
+    - **不是"使能状态"**：四组（失能/使能 × 轮询关/开）**全部为 0**，
+      唯一的变量是"是否走过 `pause()/resume()` 这条窗口"。
+
 ### 13.4 与设计文本的偏差（均已在正文处同步）
 
 | 项 | 设计原文 | 实现 | 原因 |
@@ -2084,7 +2158,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | v0.6 | 2026-09-22 | **WP3（`ros2_control`，P0 最优先）落地**：新增 `jr_ros2_control`（`SystemInterface`，`tick_source=internal|controller_manager`、`gain_mode=wire|si`、生命周期与安全落点、`compat/` 集中发行版差异）与 `jr_config_yaml`（与节点/工具**共用**的 §6.4 YAML schema，未知键报错）；`jr_core` 增加**外部驱动 tick**（`start_external()`/`step()`，与内部线程模式共用同一条 `run_cycle()`）。**Jazzy 与 Humble 双双实测绿**（组件测试 74 断言；`colcon test` 11 tests / 0 failures）。期间修掉真问题：外部模式**永远无法使能**的守卫自相矛盾（§13.3-15）、`jsdk::can` 别名缺失、ament 导出集顺序导致的 `jr_ros2::jr_core` 找不到、静态库缺 `-fPIC`。§13.2 补 WP3 行，§13.3 增至 16 条。**待办**：`JointTrajectoryController` 端到端示例（WP7 的一部分）尚未跑，列为下一步。 |
 | v0.7 | 2026-09-22 | **主目标发行版 Lyrical 打通 + JTC 端到端（三发行版）**：新增 `docker/run.sh lyrical`（Ubuntu 26.04 / gcc 15.2 / **CMake 4.2.3**）；`jr_ros2_control/test/jtc_demo/`（`robot_state_publisher` + `controller_manager` + JSB/JTC + 虚拟总线，发 1.5 s 轨迹并断言终点误差）在 **Humble / Jazzy / Lyrical 三发行版全部 PASS**（终点误差 0.008 rad，三边数值一致）。期间修掉四个真问题：① 签名判定**不能用 CMake 探测**（`check_cxx_source_compiles` 的迷你工程拿不到传递 include → 三发行版全探测失败，且失败时变量是**空串** → 静默走错分支 → Humble 才爆；改为 `__has_include` + 静态断言，并用变异测试证明守卫「会响」，§13.3-18/19）；② CMake 4 起含 C 源的包必须 `project(x C CXX)`（§13.3-17）；③ 基础镜像与 apt 仓库**错批**导致运行期 `undefined symbol`（构建全绿也照挂）→ 镜像里先 `apt-get upgrade`（§13.3-20）；④ 控制器参数必须 `spawner --param-file` 显式传（Lyrical 不再继承 CM 全局参数，§13.3-21）。§9.1 回填 Lyrical 实测基线，§13.2 增 Lyrical 列与 JTC 证据表（13.2b），风险 U1 关闭、U3 缓解。 |
 | v0.8 | 2026-09-22 | **WP2 第一段落地（`jr_interfaces` + `jr_bus` 节点）**：新增 `jr_interfaces`（**16 msg + 19 srv**，只依赖 `std_msgs`/`builtin_interfaces`）与节点层目标 `jr_node`/可执行 `jr_bus`（一个节点 = 一条总线）：配置加载与校验、`open→configure`、`~/cmd_mit`/`~/estop`/`/jr/estop_all` → 无锁信箱、快照 → `joint_feedback`/`joint_states`/`bus_status`/`rt_stats`/`faults`、退出序列（含 SIGINT 走同一条 lifecycle 路径）。**三发行版实测**：`ctest` 10/10、`colcon test` **17 tests / 0 failures / 0 告警**、JTC 端到端 PASS、节点级测试（真 DDS）PASS。核心库补齐 `RtStats` 的 min/mean（§6.1 承诺的字段不能空着）。期间撞到并修掉：① **核心库真 bug：快照从不填关节名**（节点测试按名字找关节时立刻暴露；货已发给客户就是"话题里全是空字符串"，已加回归断言）；② rosidl 包的 `package.xml` **组名与元素顺序**两个坑（`ament_xmllint`）；③ 节点测试曾用 `tx_frames` 绝对值断言"没发控制帧"（configure 阶段的描述符/参数帧也在里面 → `got 29, expected 0`）→ 改为**增量**口径；④ 容器脚本失败时把 `colcon test` 明细吞掉了（`set -e`），现在先打 `--verbose` 明细再退出；⑤ 两处 WP3 时期遗留的告警（`-Wconversion`、新发行版 `return_type::DEACTIVATE` 的 `-Wswitch`）。§13.2 增 13.2c（节点级证据表），§13.4 补 WP2 偏差。**待办**：服务层（19 个服务 + ADR-7 安全暂停 + §8.5 写闸门）、§6.5 诊断、§10.2 剩余用例（双 master/描述符中断/广播降级）。 |
-| v0.22 | 2026-10-01 | **刚度换算作废（SDK 7aa76ca）+ 状态轮询交给 SDK 调度（阶段 2）+ F33 力矩上限语义对齐**。① **kp 不再按齿比换算**：SDK 用真机判定实验（`d(e)/d(tau_ff) = 1/K_out`，三组测量 `K/kp = 1.019/1.000/1.008/1.008`）确认 `K_out = kp`，`jsdk_units_stiffness_to_kp()` 改回恒等；我们此前自己乘 `2π/gear` 的**三处**（广播路径、`hold_all()`、`apply_default_gains()`）全部清掉 —— 广播路径的刚度此前只有客户给定值的 1/8（gear=7.75），且未标定时会放弃抱持。② **F31 收口**：状态请求改由 SDK 侧调度器发（`jsdk_context_set_state_poll()`），发帧在 `cycle_end()`、结超时在 `cycle_begin()` ⇒ 同一 tick 内回填；`tick_end()` 不再自己发帧。`BusStatus` 增加 `state_sent/state_ok/state_timeout`（并在 `fill_bus_status()` 里**真正填上** —— 此前只加字段没拷贝，消息里恒 0，看起来像"SDK 一帧都没发"）；新增 `stale_zero_baseline()` 取 SDK 公开的新鲜度阈值（实测 400 ms）。真机：空闲 `age_ms` 72/56/31 ms（此前恒 `0xFFFFFFFF`），运动中 49/43/16 ms；`state_sent = state_ok = 536`、`state_timeout = 0`；负载 29.4% 不变。③ **F33**：`~/cmd` 的"限流"字段实为**力矩上限**（N·m）⇒ 字段改名 `torque_limit`、改走 `jsdk_joint_set_torque_limit_Nm()`，并修掉 CURRENT 模式下**每帧把 `torque_lim` 写成 0** 的静默假死 bug（§13.3-57）。 |
+| v0.22 | 2026-10-01 | **刚度换算作废（SDK 7aa76ca）+ 状态轮询交给 SDK 调度（阶段 2）+ F33 力矩上限语义对齐**。① **kp 不再按齿比换算**：SDK 用真机判定实验（`d(e)/d(tau_ff) = 1/K_out`，三组测量 `K/kp = 1.019/1.000/1.008/1.008`）确认 `K_out = kp`，`jsdk_units_stiffness_to_kp()` 改回恒等；我们此前自己乘 `2π/gear` 的**三处**（广播路径、`hold_all()`、`apply_default_gains()`）全部清掉 —— 广播路径的刚度此前只有客户给定值的 1/8（gear=7.75），且未标定时会放弃抱持。② **F31 收口**：状态请求改由 SDK 侧调度器发（`jsdk_context_set_state_poll()`），发帧在 `cycle_end()`、结超时在 `cycle_begin()` ⇒ 同一 tick 内回填；`tick_end()` 不再自己发帧。`BusStatus` 增加 `state_sent/state_ok/state_timeout`（并在 `fill_bus_status()` 里**真正填上** —— 此前只加字段没拷贝，消息里恒 0，看起来像"SDK 一帧都没发"）；新增 `stale_zero_baseline()` 取 SDK 公开的新鲜度阈值（实测 400 ms）。真机：空闲 `age_ms` 72/56/31 ms（此前恒 `0xFFFFFFFF`），运动中 49/43/16 ms；`state_sent = state_ok = 536`、`state_timeout = 0`；负载 29.4% 不变。③ **F33**：`~/cmd` 的"限流"字段实为**力矩上限**（N·m）⇒ 字段改名 `torque_limit`、改走 `jsdk_joint_set_torque_limit_Nm()`，并修掉 CURRENT 模式下**每帧把 `torque_lim` 写成 0** 的静默假死 bug（§13.3-57）。 ④ **kp 刚度判定实验（真机 can0/CAN FD）**：`kp=60`、扫 `tau_ff` ⇒ 斜率 `≈0.0163 rad/(N·m)` ⇒ `K_out/kp ≈ 1.02`（若按 `2π/gear` 换算会是 `0.135`，大 8.1 倍，已被排除）⇒ 与 SDK 侧 fw 1546 上的 `K/kp = 1.019/1.000/1.008/1.008` 一致，**换算恒等**（§13.3-58）。 ⑤ **`tick_overruns` 暂停窗口重复累加修复**：`deadline_of()` 是累积的，而暂停分支只 `continue`（`tick_index_` 不推进）⇒ 恢复后**每一拍**都重复量到"整个暂停时长"并各自记一次 ⇒ 真机 jog 0.5/1/2 s 后增量 132 879/519 093/2 050 096（应为 500/1000/2000 量级），纯待机为 0；新增 `Sleeper::reset_epoch()` + 恢复时**一次性结清**暂停区间 ⇒ 修复后真机同一组测量全部归 **0**（§13.3-59，用例 `test_tick_overruns`，含变异验证）。 |
 | v0.20 | 2026-09-28 | **F31：用 SDK 的非阻塞状态请求（0x41）做反馈源 + 撤回上一轮的误读**。§13.3 增至 **55** 条。① 新增 `jr.feedback.state_request_ms`（默认关，≤10 Hz/关节）：在 tick 的 `cycle_end()` 之后发 `jsdk_joint_request_state()`，**不需要安全暂停窗口** ⇒ 驱动中也能用；真机实测待机 3 s 有 `30×0x41 请求 + 30×0x41 应答 + 30×0x48 心跳`（设备逐帧在回），代价 ≈ 0（待机丢拍增量 0 vs 3；运动段 3.58e6 vs 3.22e6 同级 ⇒ 那个量级是 Classic/slcan 撑不住 1 kHz 驱动本身）。② **撤回 v0.19 的两条结论**（按 SDK 侧要求分开 `master_id` 并让关节真动后复核）："点动时设备没回应答"是 `master_id==node_id` 造成 ID 相撞的假象（分开后每 seq 都看到应答）；"position 冻结"是因为那次点动**没真的移动关节**（真值也没动）—— 关节真动 1.7 rad 时帧的 `position` 从 -0.494 跟到 1.4917。③ **待机新鲜度已达成**（SDK 侧答复后复核）：真机 `state_request_ms=100` 待机时 `age_ms` = 13/71/83/71 ms（此前恒 `0xFFFFFFFF`）—— 根因是**我们上一轮加的"必须 valid 才转达年龄"门槛**挡掉了唯一可靠的量（`valid` 是每周期旗标，`age_ms` 一直可靠）⇒ 不需要 SDK 改；④ 顺带：`feedback_age_ms()` 增加 `valid` 判据（粘滞位下只有本周期确有新帧才转达 SDK 年龄）；`jr_gen_config` 默认 `master_id` 改成 **126**（避开 node_id，避免请求/应答共用一个 CAN ID）。 ⑤ **`endpoint_poll_ms` 标废弃**（配置里置非 0 ⇒ 加载时告警并点名 `state_request_ms`，但不拒绝，保留作待机交叉核对）。⑥ **顺手修一个真 bug**：`ConfigNotes` 的提示缓冲 `kNotesLen` 只有 640 且`append_note()` **静默丢弃**装不下的提示 —— 新增一条告警就把 `node_id>7` 的提示整个吞掉，**由 `test_config` 的 notes 用例当场抓到**；已把缓冲扩到 2048 并让溢出写一个可见的截断标记。 ⑦ **跨仓库：SDK `8253678`（`feat(proto)!`）改了 4-bit `ErrorCode` 取值** —— `0x8` 由 `CAN_TIMEOUT` 变 `OVERLOAD`（`CAN_TIMEOUT` 挪到 `0x9`）、`0x4` 由 `UNDER_VOLTAGE` 改名 `VOLTAGE`（欠压/过压同码）。JointROS **不解析**该摘要（只透传），所以无逻辑改动；已更正三处**错述**（诊断 `error_code_note`、`jr_sdk_map.hpp`、`jr_status.hpp` 的注释："看门狗也报 CAN_TIMEOUT" 是错的，实际是 `ESTOP_REQUESTED` + `CAN_BUS_FAILED`）并在 `JointFeedback.msg` / `JointFault.msg` / README 里写明**取值随固件版本反转、不要在摘要值上分支**。⚠ **待确认（已反馈 SDK 侧）**：他们的名字表已对齐**新**固件，而我们现场设备是 **fw 0x609（旧表）** ⇒ 同一个 0x8 会被我们显示成 `OVERLOAD`，其实是 `CAN_TIMEOUT`；名字表需要按固件版本选，或在摘要旁标注版本前提。 |
 | v0.19 | 2026-09-27 | **F11 收口：反馈源新增"限速端点轮询"（默认关）+ README 细化为用户向文档**。§13.3 增至 **54** 条（新增 -54）。① **F11**：`jr.feedback.endpoint_poll_ms`（0 = 关）⇒ 本条总线关节**全失能**时按周期读 `pos_estimate`/`vel_estimate`，用真值覆盖 `/joint_feedback` 的 `position`/`velocity`，并置**我们自己的** `status_flags` 位 `0x80000000`；`age_ms` 改为那次轮询的年龄；上报帧的 `FEEDBACK_STALE` **照旧**（两件事不矛盾，实测 `0x80000008` 并存）。② 途中修掉两个**只有量才会现形**的缺陷：`JointStatePOD::status_flags` 原为 `uint16_t` 而 SDK 与消息都是 32 位（0x8000 以上静默丢弃，我们的位直接变 0，编译器在 `|=` 处抓到）⇒ 加宽到 `uint32_t`；调用者给的是 ROS 时间而 `fill_snapshot` 比 `now_ns()`（单调钟）⇒ `now < stamp` 恒成立、轮询在跑而位永不置 ⇒ 改由运行时自己打时间戳。③ **真机验收（只读、不使能）**：关轮询时上报帧**冻在 0.0**（`position/velocity=0/0`、`valid=false`、`age_ms=0xFFFFFFFF`）而真值 `0.000158/-0.0076`；开轮询后 `velocity` 与 `vel_estimate` **逐位一致**、`status_flags=0x80000008`。**代价**：真机 5000 ms ⇒ 窗口 1.4–5.5 ms、约 9 丢拍/次（**可用**）；真机 1000 ms ⇒ 125 ms 尖峰、约 4100 丢拍/s（**不可用**）⇒ 建议档位同步改成"真机 5000 ms 起"。④ **现场坑**：`slcand` 占着 `/dev/ttyACM0` 时裸串口路径报 `cannot open ... invalid-argument` ⇒ 改走 SocketCAN `slcan0`（已写进 README 排障表）。⑤ **calib/home 真机正例**：`calib` **通过**（`pre_calibrated read-back: true`，关节实测从 0.0001 rad 转到 0.8132 rad，`error=0`）；`home` **在设备侧失败** —— 模组没有限位开关，设备报 `detail_err=0x00020000`(`HOMING_WITHOUT_ENDSTOP`) 并超时（`axis0.error=0x20000`，随后被失能清掉）；⚠ 该故障锁存期间 `enable` 会超时（实测 2000 ms 未完成）⇒ 清掉后 `enable`/`jog`/`disable` 一次通过 （`enabled=true` / `500 ms / 284 ticks` / `disabled`，`error=0`）—— 即那次超时是**故障的后果**，不是独立缺陷。**未做**（如实登记）：F11 在"关节在动"时的新鲜值（需要不暂停 tick 的读路径）、三发行版容器矩阵复跑：**jazzy / humble / lyrical 三条全绿**（`ctest` 13/13、`colcon test` 0 failures、JTC e2e PASS，三边数值一致；humble 走 `legacy (HardwareInfo)` 而 jazzy/lyrical 走 modern，两代 `on_init` 都实测过）—— 见 §13.2b。 |
 | v0.18 | 2026-09-25 | **真机联调第二轮 + 把 `launch_smoke` 在真机宿主上跑绿**。§13.3 增至 **53** 条（新增 -51…-53），§13.2h 证据表扩到 8 行。① **F12（新发现，由 P0 的判据改造掘出）**：节点的 `bus_index_` 是**配置级**下标，而快照 `buses[]`/`tg_->bus()`/快照里 `JointStatePOD::bus_index` 是**tick 组内**下标 ⇒ 非首条总线（`humanoid_2bus` 的 `leg_right`：配置下标 1、组内 0）`1 >= bus_count(1)` ⇒ **永远 no snapshot**，关节过滤也全不匹配 ⇒ 该节点的反馈/状态/诊断/动关节服务**全废**（左侧恰好两个下标都是 0，所以一直看着是好的）；修法：新增 `bus_in_group_`（14 处归位），并把"关节下标是配置级、总线下标是组内"这个区别写进注释（免得下次"顺手统一"）；真机实测修后两侧都 `snapshot at tick N` 且各报**自己的** `bus=`、右侧关节可读 2 ok。⚠ 容器矩阵一直绿是因为冒烟只查**左侧**服务 ⇒ 已补右侧数据面断言（`nodes_online=2` + `read --joints FR_hip,FR_knee`）。② **F7**：单 master 锁的键从总线名改成**物理通道**（`lock_key()`；`virtual` 例外 —— 人形示例两条 virtual 总线的 `spec:` 相同，过度互斥会把演示/CI 全卡死）；离线用例 + 变异（⇒ FAIL 4）+ 真机对照（同通道第二个节点在 `open()` 阶段被拒、**没碰设备**；⚠ "修前"那次真的让**同通道两个 master** 上了一条总线）；连带 `test_double_start.sh` 里写死的锁文件名跟着改（Failed 11.25 s → Passed 1.68 s）。③ **F11a**：`age_ms` 不再直传 SDK 那个"报 `FEEDBACK_STALE` 同时报 `age_ms=0`"的自相矛盾值（陈旧且从未新鲜过 ⇒ `0xFFFFFFFF`，真机实测就是这个值）；**F11b**：A/B 证明 SDK 的 `unicast_poll`（50 ms）换不来新鲜（帧值与默认策略**逐位相同**）且代价 **165×**（`tick_overruns` 119→19722、负载 29.4%→57.3%）⇒ 该策略禁用，可用路线是**端点轮询**（反馈源改造列入下一轮）。④ **P0**：冒烟的"已 active"判据从冷启动 `ros2 lifecycle get`（真机 RT 宿主上单次 >5 s 被包裹超时杀掉 ⇒ **无论预算多大都永远误报**）改成**服务可调**（= `on_activate` 跑完，语义等价且是客户真正关心的）+ 负向对照（等待器必须能失败）+ `wait_topic`；真机 **18 通过 / 0 失败 rc=0**；ROS 侧 `jr_ctl_services` 92.4 s、`double_start` 1.6 s 均 Passed（⚠ 该宿主**并发**跑 ROS 侧用例会抖红，需串行）。**未做**（如实登记）：F11 的反馈源改造、`calib`/`home` 真机正例、**三发行版容器矩阵复跑**（本轮改过 `Jog.srv`/`jr_ctl`/核心库/节点层）。 |

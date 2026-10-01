@@ -73,6 +73,17 @@ public:
         return start_ns_ + tick_index * period_ns_;
     }
 
+    /** 把时间基准重新对齐到"现在"：此后第 0 拍 = 此刻。
+     *
+     * @par 为什么必须有这个（现场 bug，见 test_tick_overruns）
+     *  `deadline_of()` 是**累积**的（`start + n*period`）。暂停窗口里 tick 循环只
+     *  `continue`、**不推进 tick_index_** ⇒ 恢复后每一拍都拿"累积到该拍的 deadline"
+     *  去比"当前时间" ⇒ **每一拍都迟到、迟到量就是暂停时长** ⇒ `missed_ticks` 每拍
+     *  加一次（实测：暂停 200 ms 后增量 20,706 = 期望 103 倍；真机 jog 2 s 后
+     *  2,050,096）。`reset_epoch()` 让暂停区间只结清一次，之后恢复正常节奏。
+     */
+    void reset_epoch(std::uint64_t now) noexcept { start_ns_ = now; }
+
     /** 睡到绝对时刻（提前醒来会继续等；已过期立即返回）。 */
     void sleep_until(std::uint64_t deadline_ns) noexcept;
 
