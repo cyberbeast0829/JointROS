@@ -37,10 +37,14 @@ struct JointTarget {
     double damping = 0.0;    /**< N·m·s/rad */
     double torque = 0.0;     /**< N·m：MIT 前馈 / CST 目标（输出端） */
     double current = 0.0;    /**< A：CURRENT 目标（**电机端**） */
-    /** 限制量（0 = 不限制）：CSP 用速度限制、CSV/CURRENT 用电流限制；CST 不适用。 */
-    double velocity_limit = 0.0;  /**< rad/s */
-    double current_limit = 0.0;   /**< A */
-    bool   si_gain = false;  /**< true = 用 stiffness/damping（SDK 换算；仅 MIT 有意义） */
+    /** 限制量（0 = 不限制）：CSP/CSV 用速度限制，CSP/CSV/CURRENT 用力矩上限；CST 不适用。
+     *  ⚠ v0.22 语义修正（SDK F33）：第二个字段**不是**电流告警门限，而是固件的
+     *  `torque_lim`（正常工作**力矩上限**，电机端 N·m）——
+     *  固件在 CSP/CSV 帧里把它写成 `cur_limit_a × torque_constant`，一旦发 0
+     *  电流环就被钳到 0（电机不出力、但不报错、`is_enabled()` 仍为 1）。 */
+    double velocity_limit = 0.0;  /**< 输出端 rad/s */
+    double torque_limit = 0.0;    /**< **电机端** N·m（0 = 用 SDK 默认） */
+    bool   si_gain = false;  /**< true = 用 stiffness/damping（与 kp/kd 同值；仅 MIT 有意义） */
 };
 
 /** 一 tick 的目标集（全局关节索引）。 */

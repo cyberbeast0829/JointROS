@@ -27,5 +27,10 @@ string name
 uint8 mode
 
 float64 target                  # 单位随 mode（见上）
-float64 velocity_limit          # 0 = 不限制（CSP 用速度限制；CST 下无效）
-float64 current_limit           # 0 = 不限制（CSV/CURRENT 用电流限制；CST 下无效）
+float64 velocity_limit          # 0 = 不限制（输出端 rad/s；CSP/CSV 有效；CST 无效）
+float64 current_limit           # 0 = 不限制。⚠ 名字是历史遗留：它实际下发的是固件的
+                                #   **力矩上限** `torque_lim`（正常工作上限，越界静默钳位），
+                                #   不是过流告警门限 `current_lim`（越界会报错失能）。
+                                #   单位按 **电机端 N·m** 解释（SDK `set_torque_limit_Nm()`）；
+                                #   CSP/CSV/CURRENT 有效，CST 无效。
+                                #   ⚠ 该值会**每帧**重写设备参数，0 = 沿用 SDK 默认（不写 0）。

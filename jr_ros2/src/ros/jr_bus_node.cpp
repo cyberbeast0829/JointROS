@@ -639,21 +639,26 @@ void JrBusNode::on_cmd_mode(const jr_interfaces::msg::JointCommandArray::ConstSh
         jr::JointTarget t;
         t.mode = m;
         t.velocity_limit = (c.velocity_limit > 0.0) ? c.velocity_limit : 0.0;
-        t.current_limit = (c.current_limit > 0.0) ? c.current_limit : 0.0;
+        /* ⚠ v0.22（SDK F33）：线上的第 5..8 字节在固件里被当作 **torque_lim**
+           （`cur_limit_a × torque_constant`），不是过流告警门限；而我们的
+           `JointCommand.current_limit` 名义上是 A。以前按 A 直接转发 ⇒ 客户按
+           物理量填力矩就会差一个 torque_constant（约 0.085 倍）。
+           现在按 **N·m（电机端）** 转发，并在入参处兑底成**输出端** rad/s + N·m。 */
+        t.torque_limit = (c.current_limit > 0.0) ? c.current_limit : 0.0;
         switch (m) {
         case CmdMode::kCsp: t.position = c.target; break;
         case CmdMode::kCsv: t.velocity = c.target; break;
         case CmdMode::kCst:
             t.torque = c.target;
-            if (t.velocity_limit > 0.0 || t.current_limit > 0.0) {
+            if (t.velocity_limit > 0.0 || t.torque_limit > 0.0) {
                 /* SDK 的限制量只对 CSP/CSV/CURRENT 有效；CST 下给了也没用 → 说一次。 */
                 const std::string key = c.name + "/cst_limits";
                 if (std::find(warned_modes_.begin(), warned_modes_.end(), key) ==
                     warned_modes_.end()) {
                     warned_modes_.push_back(key);
                     RCLCPP_WARN(get_logger(),
-                                "joint '%s': velocity_limit/current_limit are ignored in CST mode "
-                                "(the SDK applies limits to CSP/CSV/CURRENT only)",
+                                "joint '%s': velocity_limit/current_limit(torque_lim) are ignored "
+                                "in CST mode (the SDK applies limits to CSP/CSV/CURRENT only)",
                                 c.name.c_str());
                 }
             }

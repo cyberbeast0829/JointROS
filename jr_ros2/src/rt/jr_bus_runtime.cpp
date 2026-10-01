@@ -1492,7 +1492,7 @@ void BusRuntime::set_interpolation(Interpolation i) noexcept
  *  - MIT：position / velocity / torque（三者都是轨迹量；只插位置会让前馈阶跃，
  *    与前馈的意义相背）；
  *  - CSP：position；CSV：velocity；CST：torque；CURRENT：current。
- *  - **不插** kp/kd/stiffness/damping 与 velocity_limit/current_limit。
+ *  - **不插** kp/kd/stiffness/damping 与 velocity_limit/torque_limit。
  */
 static void lerp_motion(const JointTarget &from, const JointTarget &to, double f,
                         JointTarget *out) noexcept
@@ -1594,14 +1594,14 @@ void BusRuntime::apply_command(const CommandSet &cmd, unsigned joint_base) noexc
 
         switch (eff.mode) {
         case CmdMode::kCsp:            jsdk_joint_set_target_position_rad(joints_[j], eff.position);
-            if (eff.velocity_limit > 0.0 || eff.current_limit > 0.0) {
-                jsdk_joint_set_limits(joints_[j], eff.velocity_limit, eff.current_limit);
+            if (eff.velocity_limit > 0.0 || eff.torque_limit > 0.0) {
+                jsdk_joint_set_torque_limit_Nm(joints_[j], eff.velocity_limit, eff.torque_limit);
             }
             break;
         case CmdMode::kCsv:
             jsdk_joint_set_target_velocity_rad_s(joints_[j], eff.velocity);
-            if (eff.velocity_limit > 0.0 || eff.current_limit > 0.0) {
-                jsdk_joint_set_limits(joints_[j], eff.velocity_limit, eff.current_limit);
+            if (eff.velocity_limit > 0.0 || eff.torque_limit > 0.0) {
+                jsdk_joint_set_torque_limit_Nm(joints_[j], eff.velocity_limit, eff.torque_limit);
             }
             break;
         case CmdMode::kCst:
@@ -1610,8 +1610,12 @@ void BusRuntime::apply_command(const CommandSet &cmd, unsigned joint_base) noexc
             break;
         case CmdMode::kCurrent:
             jsdk_joint_set_current_A(joints_[j], eff.current);
-            if (t.current_limit > 0.0) {
-                jsdk_joint_set_limits(joints_[j], 0.0, t.current_limit);
+            /* ⚠ v0.22：以前这里每一帧都调 `set_limits(0, t.current_limit)` ——
+               第二个参数在固件里是 **torque_lim**，`t.current_limit` 默认为 0 时
+               就等于**每帧把力矩上限写成 0**（电机不出力却不报错，SDK F33 的静默陷阱）。
+               现在只在客户真的给了上限时才下发。 */
+            if (t.torque_limit > 0.0) {
+                jsdk_joint_set_torque_limit_Nm(joints_[j], 0.0, t.torque_limit);
             }
             break;
         case CmdMode::kMit:
