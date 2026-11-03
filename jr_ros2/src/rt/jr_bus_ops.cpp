@@ -761,10 +761,31 @@ Status BusRuntime::save_config(const unsigned *idx, unsigned n, Result *res) noe
         const unsigned j = sel[k];
         const jsdk_status_t st = jsdk_joint_save_config(joints_[j]);
         if (st != JSDK_OK) {
-            const Status s = map_sdk(st);
+            /* ⚠ 真机实测（CYBERBEAST/ODrive 词汇，fw 0x60b，slcan）：`CONFIG_SAVE(0x22)`
+             *   会让设备**立刻重启**（紧接着读 `axis0.current_state` 会看到 0 → 1），
+             *   而 SDK 的 `save_config` 会用"读回 break_timeout 端点"来验证 ——
+             *   设备正在重启，这次读回**经常超时**，于是命令报
+             *   `CONFIG_SAVE verification failed: cannot read back the protocol timeout
+             *   endpoint`，**可实际上 Flash 已经写成功**（断电重启后零点/标定都还在）。
+             *   实测 3 次：1 次报成功、2 次报这个超时，但 3 次都真的写进去了。
+             *   ⇒ 对"验证超时"这种**不知道**的情况，如实说"未知"，而不是说"失败"。 */
+            const bool verify_timeout = (st == JSDK_ERR_TIMEOUT);
+            const Status s = verify_timeout ? Status::kUnverified : map_sdk(st);
             if (res != nullptr) {
-                res->set(s, Advice::kNone, "joint '%s': CONFIG_SAVE failed: %s (%s)",
-                         bus_.joints[j].name, jsdk_status_string(st), jsdk_context_last_error(ctx_));
+                if (verify_timeout) {
+                    res->set(s, Advice::kNone,
+                             "joint '%s': CONFIG_SAVE was sent but could NOT be verified: %s (%s). "
+                             "Measured behaviour on fw 0x60b: the device REBOOTS on CONFIG_SAVE "
+                             "(current_state 0 -> 1), so the read-back verification often times out "
+                             "**even though the flash write succeeded**. Do NOT retry blindly: wait "
+                             "~2 s, re-read the parameters (or power-cycle) and only then conclude.",
+                             bus_.joints[j].name, jsdk_status_string(st),
+                             jsdk_context_last_error(ctx_));
+                } else {
+                    res->set(s, Advice::kNone, "joint '%s': CONFIG_SAVE failed: %s (%s)",
+                             bus_.joints[j].name, jsdk_status_string(st),
+                             jsdk_context_last_error(ctx_));
+                }
             }
             return s;
         }
