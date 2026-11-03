@@ -28,5 +28,9 @@ uint64 tick_overruns            # 丢 tick 次数（实时性健康度）
 uint64 command_overwrites       # 命令在 RT 取走前被覆盖的次数
 
 # ── 需要用户知道的状态 ─────────────────────────────
-bool degraded                   # 有降级（例如广播被降级为单播、命令超时策略生效）
+# degraded = (cycle_status != 0) || entered_estop（见 fill_bus_status）。
+#  ⚠ 它与 note 里的“广播降级为单播”**不是**同一件事：那个只是 note。
+bool degraded                   # 有降级：最近一次 cycle_begin 非 OK，或曾进入 estop
+int32 cycle_status              # 最近一次 cycle_begin 的 SDK 状态码（0=OK；-5=TRANSPORT 链路错）
+bool entered_estop              # 是否曾进入 estop（粘滞）
 string note                     # 最近一次要让人看到的文本（**降级原因必须出现在这里**）

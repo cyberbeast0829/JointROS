@@ -43,6 +43,7 @@ option(JR_WERROR "Treat warnings as errors" OFF)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/../cmake")
 include(jr_sdk)
 jr_locate_jsdk()
+jr_require_sdk_api()   # 缺新 API 时在配置阶段点名"SDK 太旧"，而不是留链接错误
 
 # 后端可用性宏：把"SDK 这次到底编了哪些后端"告诉我们的代码，避免链接到
 # 不存在的工厂函数（Windows 上引用 socketcan 会直接链接失败）。

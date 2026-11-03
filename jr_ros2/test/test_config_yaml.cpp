@@ -141,6 +141,15 @@ void test_full_example()
     JR_CHECK_EQ(cfg.buses[0].nominal_bitrate, 1000000u);
     JR_CHECK_EQ(cfg.buses[0].data_bitrate, 5000000u);
 
+    /* `bitrate_explicit`：**双向**断言 —— 写了 `bitrate:` 的才是 true。
+     * 它决定 slcan 打开通道时要不要下发 `S<n>` 去改适配器设置（SDK `79ba820`）：
+     * 默认 1 Mbit 是协议默认，不是"要改你的适配器"；
+     * 把"没写"误判成"要 1M"会让一台原本 500k 的适配器被切走，设备直接消失且无报错。 */
+    JR_CHECK_MSG(cfg.buses[0].bitrate_explicit, "can0 写了 bitrate: 块 → 必须标记为显式");
+    JR_CHECK_MSG(!cfg.buses[1].bitrate_explicit, "can1 没写 bitrate: → 不得标记为显式（默认值不是指令）");
+    JR_CHECK_MSG(!cfg.buses[2].bitrate_explicit, "virt 没写 bitrate: → 不得标记为显式");
+    JR_CHECK_EQ(cfg.buses[1].nominal_bitrate, 1000000u);   /* 没写时仍是默认值，但**不下发** */
+
     /* 关节挂载（按 joints: 表分配到对应总线） */
     JR_CHECK_EQ(cfg.buses[0].joint_count, 2u);
     JR_CHECK_EQ(cfg.buses[1].joint_count, 1u);

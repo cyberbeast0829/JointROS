@@ -31,7 +31,14 @@ uint32 age_ms                   # 距上次**有效**反馈的时间。
                                 # ⚠ 若 status_flags 置了 0x80000000（端点轮询），则本字段描述的是
                                 #   **那次轮询**的年龄（不是上报帧的年龄）。
 
-uint32 status_flags             # SDK JSDK_JF_* 位（原始位；含 FEEDBACK_STALE / WATCHDOG_* / TARGET_REJECTED）。
+uint32 status_flags             # SDK JSDK_JF_* 位（原始位；含 FEEDBACK_STALE / WATCHDOG_* / TARGET_REJECTED /
+                                #   TORQUE_LIM_UNSET(0x0080) / ZERO_PENDING_REBOOT(0x0100)）。
+                                # ⚠ 解读要点（都踩过）：
+                                #   - FEEDBACK_STALE 是**粘滞**位，判新鲜请看 age_ms 是否超 stale_ms；
+                                #   - TORQUE_LIM_UNSET = 客户端没给力矩上限、SDK 退到固件默认量级
+                                #     （电机**能转但力矩被限制**，不是故障）；
+                                #   - ZERO_PENDING_REBOOT = 零点已写入并落 Flash，但**多圈累计位置
+                                #     要重启后**才归零（不是"置零失败"）。
                                 # ⚠ 最高位 0x80000000 = **我们自己加的位**（不是 SDK 位）：
                                 #   position/velocity 来自**端点轮询**（`jr.feedback.endpoint_poll_ms`，
                                 #   关着时为 0）。它与 FEEDBACK_STALE **不矛盾**：帧可以是陈旧的，

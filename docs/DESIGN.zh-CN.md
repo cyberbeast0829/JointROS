@@ -2133,6 +2133,133 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
     - **不是"使能状态"**：四组（失能/使能 × 轮询关/开）**全部为 0**，
       唯一的变量是"是否走过 `pause()/resume()` 这条窗口"。
 
+60. **上游 SDK 五个提交（v0.23 收口）—— 三个真缺陷 + 两个"无需改"**：
+
+    核对对象：`5d2e97e`（描述符 `\uXXXX`）、`79ba820`（slcan `S<n>`）、
+    `70507ed`（设备 profile）、`608a2ba`（置零提示）、`7055e89`（fault-reset 根因）。
+    结论：**两处要改代码、一处要补名字、两处确认无需改**。
+
+    **① slcan 的 `bitrate` 一直是"有参数、无效果"（`79ba820`）**
+    `jsdk_hal_slcan_open()` 的签名里**没有**仲裁段速率，我们却把
+    `bus_.nominal_bitrate` 写在参数列表的**上一个位置**传 `serial_baud` ——
+    握手速率被当成串口速率，仲裁速率从头到尾没下发过。
+    现场症状：配置写 500k、适配器仍在 1M ⇒ 总线一片死寂、**没有任何报错**。
+    ⇒ 改用 SDK 新增的 `jsdk_hal_slcan_open_ex(..., bitrate, data_bitrate)`。
+    ⚠ **但不是无条件下发**：`S<n>` 会改写适配器自己的设置（RAM/EEPROM）。
+    默认 1 Mbit 是**协议默认值**，不等于"请把我的适配器改成 1M"；把两者混为一谈会让
+    一台已由厂家工具配成 500k 的适配器被静默切走，设备直接从总线上消失。
+    因此新增 `BusCfg::bitrate_explicit`，**只有 YAML 里真的写了 `bitrate:`** 才置 true
+    （`jr_gen_config` 生成的文件总是写该块 ⇒ 生成配置生效；手写省略则完全不碰适配器）。
+    用例：`test_config`（默认必须 false）、`test_config_yaml`（写了才 true，双向断言）。
+
+    **② `fault-reset` 报"清不掉"（`7055e89`）—— 我们原来的判据是错的**
+    SDK 定位出三个独立根因：`CLEAR_ERRORS(0x65)` 清不掉某些位（如
+    `axis0.error` 的 CAN_BUS_FAILED，能清掉它的是**写该位=0**）；
+    `feedback().axis_error` 是 0x45 查询的**快照、不会自己刷新**；
+    而 `is_fault()` 是 `mit_err` / 心跳 / 0x45 三者的**并集**，前两者又是上一帧的历史值
+    ⇒ 设备已干净、我们仍报有故障。
+    我们此前 `BusRuntime::fault_reset()` 恰好踩了全部三条：自己跑 `cycle_*`、
+    用 `is_fault()` 判据、**且只在 `is_fault()!=0` 时才动手**（连"写锁存位"那步都没有）。
+    ⇒ 改用 `jsdk_joint_fault_reset_wait()`（推状态机 → 回退写锁存位 → 重查 0x45 再判），
+    并**去掉 `is_fault()` 闸门**（拿会撒谎的并集决定"要不要清"是自相矛盾的）。
+    用例 `test_ops::test_fault_reset_uses_raw_bitmaps` 只看**设备侧真值**（写
+    `axis0.error=1` → reset → 读回必须 0）；变异回旧闸门 ⇒ 两条断言变红
+    （其中一条正是"报了成功但设备里错误位还在"）。
+    ⚠ **更正 §13.3 早期的 F29 结论**：我们曾写"estop 锁存只有 `reset`/断电才能清"。
+    现在能说的是：SDK 已尝试 `CLEAR_ERRORS` + 写锁存位 + 重查 0x45，仍有非零原始位
+    ⇒ **故障原因还在**（物理原因/需重启），而不是"固件锁死了"。
+    失败时仍保留 `Advice::kNeedsDeviceReset`，服务层据此（且仅当请求允许）走软复位。
+
+    **③ 状态位名字缺两项（跨 `df48bae` / `70507ed`）**
+    `joint_status_flags_text()` 的表里漏了 `TORQUE_LIM_UNSET`（0x0080，F33）
+    与 `ZERO_PENDING_REBOOT`（0x0100），诊断里显示成 `0x80(unknown)` / `0x100(unknown)` ——
+    而这两个恰恰最需要人看懂（一个"力矩被限制但能转"，一个"零点已写、要重启才归零"）。
+    ⇒ 补进表里；用例 `test_ops::test_status_flag_names` 同时断言**未定义位仍如实标 unknown**
+    （不能为了好看把未知位吞掉）。
+
+    **④ 设备 profile（`70507ed`）：本仓库无需改**
+    新 SDK 支持"MIT 扁平词汇"固件，并按运行时描述符解析出的**能力位**选语义
+    （状态来源、标定通路、`home` 是否支持、`tau_max` 派生、看门狗按描述符类型读写…）。
+    我们的设备走 `axis0.*` + `requested_state` ⇒ 解析为 **ODRIVE** 家族，
+    **走的是与以前逐字节相同的分支**（SDK 明确"ODrive 在前，保持老设备不变"）。
+    `JSDK_CONTEXT_MAX_SIZE` 6144→7168 也与我们无关：ADR-12 要求按
+    `jsdk_context_size()` 的**运行时**返回值分配（`jr_bus_runtime.cpp`），
+    我们从不把它当数组上界 ⇒ 尺寸增长不会溢出。
+    可选（未做）：把 `jsdk_joint_get_device_family()` 打进 `status`，便于现场排除误判。
+
+    **⑤ 描述符 `\uXXXX`（`5d2e97e`）：无需改**
+    解析器在 SDK 内部；我们从不自己解析描述符 JSON（只做 raw 透传/缓存）。
+    但它解释了另一类现场症状：**`configure()` 失败可能源于描述符里一个与单位有关的
+    转义字符**，而不是总线/设备问题 —— 看到 `configure()` 报 parse 错时先查描述符文本。
+
+61. **`degraded` 恒为 1（真机 `status` 抓到的"仪表撒谎"）**：
+
+    现象：Classic/slcan 单关节总线上 `jr_ctl status` 一直报 `degraded=1`，而
+    `link_up=1`、`tx_failed=0`、`link_errors=0`、`tick_overruns=0` —— 无从下手。
+
+    根因在节点层（不在核心库）：`fill_bus_status()` 写的是
+    `degraded = b.degraded || !out->note.empty() || estop_latched_`，
+    而 `note` **几乎永远非空**（Classic 上"广播降级为单播"、配置期提示…）
+    ⇒ 只要有任何说明文字，`degraded` 就是真。注释又把它描述成
+    "广播被降级为单播/命令超时"，与实现（`cycle_status != 0 || entered_estop`）不一致。
+
+    ⇒ 改法：`degraded = b.degraded || estop_latched_`（只表示**真有问题**），
+    `note` 仍然照常带出（它才是"最近发生了什么"），并新增
+    `BusStatus.cycle_status` / `entered_estop` 两个字段把**原因**暴露出来，
+    `jr_ctl status` 在 `degraded=1` 时打印
+    `degraded reason: cycle_status=<SDK 码> entered_estop=<0|1>`。
+    `cycle_begin()` 只在参数非法（-1）或 HAL `recv()` 报链路错（-5）时非 0，
+    所以这个码直接可对到 SDK 状态码。
+    真机复测：修前 `degraded=1`，修后 `degraded=0` 且 note 不变。
+
+62. **真机运维三项（calibrate / set-zero / save）+ `effort` 的来源核查（v0.23）**：
+
+    设备：**ODrive 关节**（ODrive 词汇），用 **MIT 力位混合协议**控制；**空载**、slcan CANable、1 Mbit、ID 1、gear=9、fw `0x60b`。
+
+    **① `effort` 是实时值，但它继承了设备电流通道的零漂**
+    `effort` 不来自心跳，也不来自 `0x45`：它是 MIT **应答帧**里的电流，按
+    `fb.torque_Nm = current × torque_constant × gear_ratio` 算出来的（每控制帧刷新）。
+    空载 + 失能时实测：
+    | 量 | 值 |
+    |---|---|
+    | `axis0.motor.current_control.Iq_measured` | **-0.1438 A**（真实值应为 0） |
+    | `axis0.motor.current_control.Iq_setpoint` | 0.0521 A |
+    | 我们的 `JointFeedback.current` | -0.1367 A |
+    | 我们的 `JointFeedback.effort` | **-0.0321 N·m** = -0.1367 × 0.0260518 × 9 ✓ |
+    ⇒ 公式对、刷新对；**错的是设备侧电流的零点**（而且会漂：另一次测得 +0.098 A）。
+    ⇒ 现场判读规则：**`|effort|` 小于约 0.05 N·m 时不要当力矩用**（那是零漂），
+    只能当相对变化看；要绝对力矩必须先在设备侧做电流偏置标定。
+
+    **② `calibrate`：通过**
+    `jr_ctl calib` → *calibration verified: motor & encoder pre_calibrated = true*；
+    读回两个 `pre_calibrated` 均为 `true`、`error=0`、结束后回到 IDLE。
+    （本设备有 `axis0.requested_state`、无 `action.calibrate` ⇒ 走 ODRIVE 老路，
+    我们那条"读回 pre_calibrated"的校验是有效的，不误报。）
+
+    **③ `set-zero`：通过**
+    `1.05315 turns → 2.5034e-05 turns`（≈0），消息如实写 `NOT persisted`。
+    零点在 `save` + 多次设备重启后仍是 `1.9e-06` ⇒ **零点确实落进了 Flash**。
+
+    **④ `save`：写成功了，但 SDK 的校验会**假失败**（跨仓库问题）**
+    现象：`save --confirm` 有时报
+    *CONFIG_SAVE verification failed: cannot read back the protocol timeout endpoint*，
+    有时报 *configuration saved to flash*。实测 3 次：**1 成功 / 2 假失败**，
+    但**三次都真的写进去了**（断电重启后零点/标定都在）。
+    原因（现场时序证据）：`CONFIG_SAVE(0x22)` 之后设备**立刻重启** ——
+    `+0.3 s` 时 `axis0.current_state = 0`、位置是过渡值；`+2.3 s` 恢复 `1`、位置≈0。
+    而 SDK 的 `save_config()` 用"读回 `break_timeout` 端点"来验证；设备正在重启，
+    这次读回**随机超时** ⇒ 把"没验成"报成了"失败"。
+    **JointROS 侧改法**（能立刻做的、且不越权改 SDK 语义）：把这一支的结论从
+    `kTimeout`（=失败）改成 **`kUnverified`**，并在消息里写明
+    "CONFIG_SAVE 后设备会重启，读回超时**不代表写失败**；等 ~2 s 重读/断电重启再下结论，
+    不要盲目重试"。真机复测：报 `UNVERIFIED` + 该说明。
+    ⚠ **需要 SDK 侧跟进**：`jsdk_joint_save_config()` 的校验应容忍"设备重启"
+    （重启后重新建立会话再读回，或改用不依赖参数读回的判据）。
+    ⚠ 顺带：save 引起的重启会让紧随其后的 `reset`/重连偶发
+    *descriptor download failed … 0/0 bytes*（slcan 首帧丢失）—— 重启节点即可恢复，
+    不要据此判断设备坏了。
+
+
 ### 13.4 与设计文本的偏差（均已在正文处同步）
 
 | 项 | 设计原文 | 实现 | 原因 |
@@ -2179,6 +2306,7 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
 | v0.6 | 2026-09-22 | **WP3（`ros2_control`，P0 最优先）落地**：新增 `jr_ros2_control`（`SystemInterface`，`tick_source=internal|controller_manager`、`gain_mode=wire|si`、生命周期与安全落点、`compat/` 集中发行版差异）与 `jr_config_yaml`（与节点/工具**共用**的 §6.4 YAML schema，未知键报错）；`jr_core` 增加**外部驱动 tick**（`start_external()`/`step()`，与内部线程模式共用同一条 `run_cycle()`）。**Jazzy 与 Humble 双双实测绿**（组件测试 74 断言；`colcon test` 11 tests / 0 failures）。期间修掉真问题：外部模式**永远无法使能**的守卫自相矛盾（§13.3-15）、`jsdk::can` 别名缺失、ament 导出集顺序导致的 `jr_ros2::jr_core` 找不到、静态库缺 `-fPIC`。§13.2 补 WP3 行，§13.3 增至 16 条。**待办**：`JointTrajectoryController` 端到端示例（WP7 的一部分）尚未跑，列为下一步。 |
 | v0.7 | 2026-09-22 | **主目标发行版 Lyrical 打通 + JTC 端到端（三发行版）**：新增 `docker/run.sh lyrical`（Ubuntu 26.04 / gcc 15.2 / **CMake 4.2.3**）；`jr_ros2_control/test/jtc_demo/`（`robot_state_publisher` + `controller_manager` + JSB/JTC + 虚拟总线，发 1.5 s 轨迹并断言终点误差）在 **Humble / Jazzy / Lyrical 三发行版全部 PASS**（终点误差 0.008 rad，三边数值一致）。期间修掉四个真问题：① 签名判定**不能用 CMake 探测**（`check_cxx_source_compiles` 的迷你工程拿不到传递 include → 三发行版全探测失败，且失败时变量是**空串** → 静默走错分支 → Humble 才爆；改为 `__has_include` + 静态断言，并用变异测试证明守卫「会响」，§13.3-18/19）；② CMake 4 起含 C 源的包必须 `project(x C CXX)`（§13.3-17）；③ 基础镜像与 apt 仓库**错批**导致运行期 `undefined symbol`（构建全绿也照挂）→ 镜像里先 `apt-get upgrade`（§13.3-20）；④ 控制器参数必须 `spawner --param-file` 显式传（Lyrical 不再继承 CM 全局参数，§13.3-21）。§9.1 回填 Lyrical 实测基线，§13.2 增 Lyrical 列与 JTC 证据表（13.2b），风险 U1 关闭、U3 缓解。 |
 | v0.8 | 2026-09-22 | **WP2 第一段落地（`jr_interfaces` + `jr_bus` 节点）**：新增 `jr_interfaces`（**16 msg + 19 srv**，只依赖 `std_msgs`/`builtin_interfaces`）与节点层目标 `jr_node`/可执行 `jr_bus`（一个节点 = 一条总线）：配置加载与校验、`open→configure`、`~/cmd_mit`/`~/estop`/`/jr/estop_all` → 无锁信箱、快照 → `joint_feedback`/`joint_states`/`bus_status`/`rt_stats`/`faults`、退出序列（含 SIGINT 走同一条 lifecycle 路径）。**三发行版实测**：`ctest` 10/10、`colcon test` **17 tests / 0 failures / 0 告警**、JTC 端到端 PASS、节点级测试（真 DDS）PASS。核心库补齐 `RtStats` 的 min/mean（§6.1 承诺的字段不能空着）。期间撞到并修掉：① **核心库真 bug：快照从不填关节名**（节点测试按名字找关节时立刻暴露；货已发给客户就是"话题里全是空字符串"，已加回归断言）；② rosidl 包的 `package.xml` **组名与元素顺序**两个坑（`ament_xmllint`）；③ 节点测试曾用 `tx_frames` 绝对值断言"没发控制帧"（configure 阶段的描述符/参数帧也在里面 → `got 29, expected 0`）→ 改为**增量**口径；④ 容器脚本失败时把 `colcon test` 明细吞掉了（`set -e`），现在先打 `--verbose` 明细再退出；⑤ 两处 WP3 时期遗留的告警（`-Wconversion`、新发行版 `return_type::DEACTIVATE` 的 `-Wswitch`）。§13.2 增 13.2c（节点级证据表），§13.4 补 WP2 偏差。**待办**：服务层（19 个服务 + ADR-7 安全暂停 + §8.5 写闸门）、§6.5 诊断、§10.2 剩余用例（双 master/描述符中断/广播降级）。 |
+| v0.23 | 2026-11-03 | **对齐上游 SDK 五个提交：slcan 速率真正下发 + fault-reset 判据纠错 + 状态位补名**。① `79ba820`：旧 `jsdk_hal_slcan_open()` **没有仲裁段速率参数**，我们的 `nominal_bitrate` 从来没下发过（配置 500k、适配器仍在 1M，总线死寂且无报错）⇒ 改用 `jsdk_hal_slcan_open_ex()`；但**只在该速率被显式配置时**才下发 `S<n>`（新增 `BusCfg::bitrate_explicit`：`S<n>` 会改写适配器设置，默认 1 Mbit 是协议默认、不是"改你的适配器"）。② `7055e89`：我们的 `fault_reset()` 同时踩中 SDK 定位的三个根因（自跑 `cycle_*`、用 `is_fault()` 当判据、且只在 `is_fault()!=0` 时才动手 ⇒ 锁存位还在却回"no fault latched"）⇒ 改用 `jsdk_joint_fault_reset_wait()`（`CLEAR_ERRORS` → 回退写锁存位 → 重查 0x45）并去掉该闸门；用例只看设备侧真值，变异回旧闸门即红。**更正 F29**：不再断言"estop 锁存只能靠 reset/断电"，改为"SDK 三步走完仍有非零原始位 ⇒ 原因还在"。③ 诊断表补 `TORQUE_LIM_UNSET(0x0080)` / `ZERO_PENDING_REBOOT(0x0100)`（原显示 `(unknown)`），并保留未定义位如实标 unknown。④ `70507ed` 设备 profile：本设备走 `axis0.*`+`requested_state` ⇒ 解析为 ODRIVE、分支与以前逐字节相同，无需改；`JSDK_CONTEXT_MAX_SIZE` 6144→7168 不影响（ADR-12 按 `jsdk_context_size()` 运行时分配）。⑤ `5d2e97e` 描述符 `\uXXXX`：我们不自解析描述符，无需改，但记录"configure parse 错可能是描述符里的转义字符"。（§13.3-60） |
 | v0.22 | 2026-10-01 | **刚度换算作废（SDK 7aa76ca）+ 状态轮询交给 SDK 调度（阶段 2）+ F33 力矩上限语义对齐**。① **kp 不再按齿比换算**：SDK 用真机判定实验（`d(e)/d(tau_ff) = 1/K_out`，三组测量 `K/kp = 1.019/1.000/1.008/1.008`）确认 `K_out = kp`，`jsdk_units_stiffness_to_kp()` 改回恒等；我们此前自己乘 `2π/gear` 的**三处**（广播路径、`hold_all()`、`apply_default_gains()`）全部清掉 —— 广播路径的刚度此前只有客户给定值的 1/8（gear=7.75），且未标定时会放弃抱持。② **F31 收口**：状态请求改由 SDK 侧调度器发（`jsdk_context_set_state_poll()`），发帧在 `cycle_end()`、结超时在 `cycle_begin()` ⇒ 同一 tick 内回填；`tick_end()` 不再自己发帧。`BusStatus` 增加 `state_sent/state_ok/state_timeout`（并在 `fill_bus_status()` 里**真正填上** —— 此前只加字段没拷贝，消息里恒 0，看起来像"SDK 一帧都没发"）；新增 `stale_zero_baseline()` 取 SDK 公开的新鲜度阈值（实测 400 ms）。真机：空闲 `age_ms` 72/56/31 ms（此前恒 `0xFFFFFFFF`），运动中 49/43/16 ms；`state_sent = state_ok = 536`、`state_timeout = 0`；负载 29.4% 不变。③ **F33**：`~/cmd` 的"限流"字段实为**力矩上限**（N·m）⇒ 字段改名 `torque_limit`、改走 `jsdk_joint_set_torque_limit_Nm()`，并修掉 CURRENT 模式下**每帧把 `torque_lim` 写成 0** 的静默假死 bug（§13.3-57）。 ④ **kp 刚度判定实验（真机 can0/CAN FD）**：`kp=60`、扫 `tau_ff` ⇒ 斜率 `≈0.0163 rad/(N·m)` ⇒ `K_out/kp ≈ 1.02`（若按 `2π/gear` 换算会是 `0.135`，大 8.1 倍，已被排除）⇒ 与 SDK 侧 fw 1546 上的 `K/kp = 1.019/1.000/1.008/1.008` 一致，**换算恒等**（§13.3-58）。 ⑤ **`tick_overruns` 暂停窗口重复累加修复**：`deadline_of()` 是累积的，而暂停分支只 `continue`（`tick_index_` 不推进）⇒ 恢复后**每一拍**都重复量到"整个暂停时长"并各自记一次 ⇒ 真机 jog 0.5/1/2 s 后增量 132 879/519 093/2 050 096（应为 500/1000/2000 量级），纯待机为 0；新增 `Sleeper::reset_epoch()` + 恢复时**一次性结清**暂停区间 ⇒ 修复后真机同一组测量全部归 **0**（§13.3-59，用例 `test_tick_overruns`，含变异验证）。 |
 | v0.20 | 2026-09-28 | **F31：用 SDK 的非阻塞状态请求（0x41）做反馈源 + 撤回上一轮的误读**。§13.3 增至 **55** 条。① 新增 `jr.feedback.state_request_ms`（默认关，≤10 Hz/关节）：在 tick 的 `cycle_end()` 之后发 `jsdk_joint_request_state()`，**不需要安全暂停窗口** ⇒ 驱动中也能用；真机实测待机 3 s 有 `30×0x41 请求 + 30×0x41 应答 + 30×0x48 心跳`（设备逐帧在回），代价 ≈ 0（待机丢拍增量 0 vs 3；运动段 3.58e6 vs 3.22e6 同级 ⇒ 那个量级是 Classic/slcan 撑不住 1 kHz 驱动本身）。② **撤回 v0.19 的两条结论**（按 SDK 侧要求分开 `master_id` 并让关节真动后复核）："点动时设备没回应答"是 `master_id==node_id` 造成 ID 相撞的假象（分开后每 seq 都看到应答）；"position 冻结"是因为那次点动**没真的移动关节**（真值也没动）—— 关节真动 1.7 rad 时帧的 `position` 从 -0.494 跟到 1.4917。③ **待机新鲜度已达成**（SDK 侧答复后复核）：真机 `state_request_ms=100` 待机时 `age_ms` = 13/71/83/71 ms（此前恒 `0xFFFFFFFF`）—— 根因是**我们上一轮加的"必须 valid 才转达年龄"门槛**挡掉了唯一可靠的量（`valid` 是每周期旗标，`age_ms` 一直可靠）⇒ 不需要 SDK 改；④ 顺带：`feedback_age_ms()` 增加 `valid` 判据（粘滞位下只有本周期确有新帧才转达 SDK 年龄）；`jr_gen_config` 默认 `master_id` 改成 **126**（避开 node_id，避免请求/应答共用一个 CAN ID）。 ⑤ **`endpoint_poll_ms` 标废弃**（配置里置非 0 ⇒ 加载时告警并点名 `state_request_ms`，但不拒绝，保留作待机交叉核对）。⑥ **顺手修一个真 bug**：`ConfigNotes` 的提示缓冲 `kNotesLen` 只有 640 且`append_note()` **静默丢弃**装不下的提示 —— 新增一条告警就把 `node_id>7` 的提示整个吞掉，**由 `test_config` 的 notes 用例当场抓到**；已把缓冲扩到 2048 并让溢出写一个可见的截断标记。 ⑦ **跨仓库：SDK `8253678`（`feat(proto)!`）改了 4-bit `ErrorCode` 取值** —— `0x8` 由 `CAN_TIMEOUT` 变 `OVERLOAD`（`CAN_TIMEOUT` 挪到 `0x9`）、`0x4` 由 `UNDER_VOLTAGE` 改名 `VOLTAGE`（欠压/过压同码）。JointROS **不解析**该摘要（只透传），所以无逻辑改动；已更正三处**错述**（诊断 `error_code_note`、`jr_sdk_map.hpp`、`jr_status.hpp` 的注释："看门狗也报 CAN_TIMEOUT" 是错的，实际是 `ESTOP_REQUESTED` + `CAN_BUS_FAILED`）并在 `JointFeedback.msg` / `JointFault.msg` / README 里写明**取值随固件版本反转、不要在摘要值上分支**。⚠ **待确认（已反馈 SDK 侧）**：他们的名字表已对齐**新**固件，而我们现场设备是 **fw 0x609（旧表）** ⇒ 同一个 0x8 会被我们显示成 `OVERLOAD`，其实是 `CAN_TIMEOUT`；名字表需要按固件版本选，或在摘要旁标注版本前提。 |
 | v0.19 | 2026-09-27 | **F11 收口：反馈源新增"限速端点轮询"（默认关）+ README 细化为用户向文档**。§13.3 增至 **54** 条（新增 -54）。① **F11**：`jr.feedback.endpoint_poll_ms`（0 = 关）⇒ 本条总线关节**全失能**时按周期读 `pos_estimate`/`vel_estimate`，用真值覆盖 `/joint_feedback` 的 `position`/`velocity`，并置**我们自己的** `status_flags` 位 `0x80000000`；`age_ms` 改为那次轮询的年龄；上报帧的 `FEEDBACK_STALE` **照旧**（两件事不矛盾，实测 `0x80000008` 并存）。② 途中修掉两个**只有量才会现形**的缺陷：`JointStatePOD::status_flags` 原为 `uint16_t` 而 SDK 与消息都是 32 位（0x8000 以上静默丢弃，我们的位直接变 0，编译器在 `|=` 处抓到）⇒ 加宽到 `uint32_t`；调用者给的是 ROS 时间而 `fill_snapshot` 比 `now_ns()`（单调钟）⇒ `now < stamp` 恒成立、轮询在跑而位永不置 ⇒ 改由运行时自己打时间戳。③ **真机验收（只读、不使能）**：关轮询时上报帧**冻在 0.0**（`position/velocity=0/0`、`valid=false`、`age_ms=0xFFFFFFFF`）而真值 `0.000158/-0.0076`；开轮询后 `velocity` 与 `vel_estimate` **逐位一致**、`status_flags=0x80000008`。**代价**：真机 5000 ms ⇒ 窗口 1.4–5.5 ms、约 9 丢拍/次（**可用**）；真机 1000 ms ⇒ 125 ms 尖峰、约 4100 丢拍/s（**不可用**）⇒ 建议档位同步改成"真机 5000 ms 起"。④ **现场坑**：`slcand` 占着 `/dev/ttyACM0` 时裸串口路径报 `cannot open ... invalid-argument` ⇒ 改走 SocketCAN `slcan0`（已写进 README 排障表）。⑤ **calib/home 真机正例**：`calib` **通过**（`pre_calibrated read-back: true`，关节实测从 0.0001 rad 转到 0.8132 rad，`error=0`）；`home` **在设备侧失败** —— 模组没有限位开关，设备报 `detail_err=0x00020000`(`HOMING_WITHOUT_ENDSTOP`) 并超时（`axis0.error=0x20000`，随后被失能清掉）；⚠ 该故障锁存期间 `enable` 会超时（实测 2000 ms 未完成）⇒ 清掉后 `enable`/`jog`/`disable` 一次通过 （`enabled=true` / `500 ms / 284 ticks` / `disabled`，`error=0`）—— 即那次超时是**故障的后果**，不是独立缺陷。**未做**（如实登记）：F11 在"关节在动"时的新鲜值（需要不暂停 tick 的读路径）、三发行版容器矩阵复跑：**jazzy / humble / lyrical 三条全绿**（`ctest` 13/13、`colcon test` 0 failures、JTC e2e PASS，三边数值一致；humble 走 `legacy (HardwareInfo)` 而 jazzy/lyrical 走 modern，两代 `on_init` 都实测过）—— 见 §13.2b。 |

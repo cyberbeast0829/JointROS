@@ -809,7 +809,18 @@ void JrBusNode::fill_bus_status(const StateSnapshot &snap, jr_interfaces::msg::B
     } else {
         out->note = bus_note.empty() ? group_note : bus_note;
     }
-    out->degraded = b.degraded || !out->note.empty() || estop_latched_;
+    /* ⚠ `degraded` 只表示**真的有问题**：最近一次 `cycle_begin()` 非 OK，或曾进入 estop。
+     *
+     * 踩过的坑（真机，Classic/slcan）：这里以前是
+     *     out->degraded = b.degraded || !out->note.empty() || estop_latched_;
+     * 而 `note` 在多数总线上**永远非空**（例如 Classic 上"广播降级为单播"、配置期
+     * 的提示），于是 `degraded` 恒为 1 —— 现场看到 "degraded=1" 却查不出任何原因
+     * （链路全绿、tx_failed=0、link_errors=0），flag 因此彻底失去意义。
+     * `note` 仍然照常带出来（它才是"最近发生了什么"的说明），`cycle_status`
+     * 给出 `degraded` 的具体状态码。 */
+    out->degraded = b.degraded || estop_latched_;
+    out->cycle_status = b.cycle_status;
+    out->entered_estop = b.entered_estop || estop_latched_;
     if (estop_latched_) {
         if (out->note.empty()) {
             out->note = "ESTOP broadcast was sent from this node";

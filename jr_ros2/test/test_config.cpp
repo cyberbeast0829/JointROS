@@ -75,6 +75,22 @@ void test_is_fd_default_is_classic()
                  "“心跳收得到、请求没人应”（真机实测，极难定位）");
 }
 
+/** `bitrate_explicit` 的**默认值**必须是 false（SDK `79ba820`）。
+ *
+ *  它决定 slcan 打开通道时要不要下发 `S<n>` 去**改适配器自己的配置**。
+ *  默认值 1 Mbit 是**协议默认**，不是"请把适配器改成 1M"：
+ *  如果默认就为 true，一台被厂家工具配成 500k 的适配器会被静默切到 1M，
+ *  设备直接从总线消失（心跳没了、没有任何报错）—— 现场极难定位。 */
+void test_bitrate_not_applied_by_default()
+{
+    JR_CASE("bitrate 默认值不是“指令”：默认绝不改适配器设置（slcan S<n> 只在显式配置时下发）");
+    const BusCfg b = default_bus_cfg();
+    JR_CHECK_MSG(b.bitrate_explicit == false,
+                 "default_bus_cfg().bitrate_explicit 变 true 了 —— slcan 会在打开通道时"
+                 "改写适配器速率，可能把现场已配好的适配器切走");
+    JR_CHECK_EQ(b.nominal_bitrate, 1000000u);   /* 默认值仍在，但不会被下发 */
+}
+
 void test_duplicate_node_id_rejected()
 {
     JR_CASE("同总线 node_id 重复必须被拒");
@@ -254,6 +270,7 @@ int main()
     test_valid_passes();
     test_master_id_zero_rejected();
     test_is_fd_default_is_classic();
+    test_bitrate_not_applied_by_default();
     test_duplicate_node_id_rejected();
     test_duplicate_joint_name_across_buses_rejected();
     test_bus_not_in_any_group_rejected();

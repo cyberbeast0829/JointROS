@@ -69,6 +69,18 @@ struct BusStatsPOD {
     std::uint32_t link_errors = 0u;
     std::uint32_t last_rx_age_ms = 0u;
     std::uint32_t hal_bus_flags = 0u;
+    /** 最近一次 `jsdk_context_cycle_begin()` 的原始状态码（0 = OK）。
+     *
+     * @par 为什么要暴露它
+     *  `degraded` 就是由它算出来的（见 `fill_bus_status()`），但只给一个 bool
+     *  时，现场只看到 “degraded=1” 而**查不出原因**（真机实测：链路正常、
+     *  `tx_failed=0`/`link_errors=0`，却一直 degraded）。
+     *  `cycle_begin()` 只在两种情况下非 0：参数非法（-1）或 HAL `recv()` 报链路错
+     *  （-5 TRANSPORT）—— 有了这个数就能直接对到 SDK 状态码。
+     *  ⚠ 它是**瞬时值**（每 tick 重写），不是粘滞位。 */
+    std::int32_t  cycle_status = 0;
+    /** 是否曾进入 estop（粘滞；只有 `close_buses`/重新 configure 才清）。 */
+    bool          entered_estop = false;
     /** F31：SDK 侧状态轮询的观测计数（帧数；`POS_VEL|CURRENT` 一次轮询 = 2 帧）。
      *  `ok / sent` 低 ⇒ 总线被控制帧挤满或链路丢帧；`timeout` > 0 ⇒ 设备没答。 */
     std::uint32_t state_sent = 0u;

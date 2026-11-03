@@ -22,6 +22,9 @@
 #include "jr_ros2/rt/jr_tick_group.hpp"
 #include "jr_test.hpp"
 
+/* `JSDK_JF_*` 状态位宏直接来自 SDK 公共头（诊断文字用例要对拍它们的名字）。 */
+#include "joint_sdk/joint_sdk.h"
+
 using namespace jr;
 using namespace jr::rt;
 
@@ -492,6 +495,97 @@ void test_node_id_keeps_accounting_in_sync()
 
 }  // namespace
 
+void test_fault_reset_uses_raw_bitmaps()
+{
+    JR_CASE("故障复位：锁存的错误位必须清得掉（判据是 0x45 原始位图，不是 is_fault()）");
+
+    Config cfg = make_cfg();
+    Result r;
+    TickGroup tg;
+    JR_CHECK_MSG(open_ready(tg, cfg, &r), r.message);
+
+    /* ---- ① 设备本来就干净：调用必须幂等成功，且说“本来就没有” ---- */
+    {
+        const Status st0 = tg.bus(0).fault_reset(&r);
+        std::printf("  clean device → %s | %s\n", to_string(r.status), r.message);
+        JR_CHECK_MSG(st0 == Status::kOk, r.message);
+        JR_CHECK_CONTAINS(r.message, "no fault to report");
+    }
+
+    /* ---- ② 锁存一个错误位（`axis0.error` 在描述符里是可写端点） ---- */
+    {
+        ParamWriteItem w;
+        w.joint_index = 0u;
+        w.path = "axis0.error";
+        w.requested.type = ParamType::kU32;
+        w.requested.v.u32 = 0x1u;                  /* CAN_BUS_FAILED 一类的可写锁存位 */
+        const Status stw = tg.bus(0).write_params(&w, 1u, true, false, &r);
+        std::printf("  latch axis0.error=1 → %s verified=%d | %s\n", to_string(w.status),
+                    w.verified ? 1 : 0, w.message);
+        JR_CHECK_MSG(stw == Status::kOk, w.message);
+
+        bool ok = false;
+        const std::uint32_t latched = read_u32(tg, "axis0.error", &ok);
+        JR_CHECK_MSG(ok, "读回 axis0.error 失败");
+        JR_CHECK_MSG(latched != 0u, "写进去的错误位没有留在设备里（前提不成立，下面的断言无意义）");
+    }
+
+    /* ---- ③ 复位：必须清掉。
+     *
+     * 这就是 SDK `7055e89` 的三个根因合起来造成的现场症状 ——
+     * 旧实现用 `jsdk_joint_is_fault()`（= `mit_err`/心跳/0x45 三者的**并集**，
+     * 前两者是上一帧的历史快照）当判据，而且**只在 `is_fault()` 非 0 时才动手**：
+     *   - 设备锁存了错误但还没被采样到 ⇒ 直接回“no fault latched”，**根本不清**；
+     *   - 采样到了、`CLEAR_ERRORS` 又清不掉该位 ⇒ 永远超时。
+     * 用例只看**设备侧的真值**（`axis0.error` 读回 0），不看我们自己的说法。 ---- */
+    {
+        const Status st1 = tg.bus(0).fault_reset(&r);
+        std::printf("  latched reset → %s | %s\n", to_string(r.status), r.message);
+        JR_CHECK_MSG(st1 == Status::kOk, r.message);
+
+        bool ok = false;
+        const std::uint32_t after = read_u32(tg, "axis0.error", &ok);
+        JR_CHECK(ok);
+        JR_CHECK_MSG(after == 0u, "fault_reset 报了成功，但设备里的错误位还在");
+    }
+
+    tg.close_buses(ExitAction::kDisable, &r);
+}
+
+void test_status_flag_names()
+{
+    JR_CASE("诊断文字：SDK 新增的状态位必须有名字（不能显示 0x80(unknown)）");
+
+    char buf[256];
+
+    /* 这两项曾经漏在表外：TORQUE_LIM_UNSET（F33）与 ZERO_PENDING_REBOOT。
+       它们恰恰最需要人看懂 —— 一个是“力矩被限制、但能转”，
+       一个是“零点已写入、要重启才归零”。 */
+    joint_status_flags_text(static_cast<std::uint16_t>(JSDK_JF_TORQUE_LIM_UNSET), buf, sizeof buf);
+    std::printf("  0x0080 → %s\n", buf);
+    JR_CHECK_CONTAINS(buf, "TORQUE_LIM_UNSET");
+
+    joint_status_flags_text(static_cast<std::uint16_t>(JSDK_JF_ZERO_PENDING_REBOOT), buf, sizeof buf);
+    std::printf("  0x0100 → %s\n", buf);
+    JR_CHECK_CONTAINS(buf, "ZERO_PENDING_REBOOT");
+
+    /* 组合位也要都列出来，且**不得**出现 unknown。 */
+    joint_status_flags_text(static_cast<std::uint16_t>(JSDK_JF_TORQUE_LIM_UNSET |
+                                                      JSDK_JF_ZERO_PENDING_REBOOT |
+                                                      JSDK_JF_FEEDBACK_STALE),
+                            buf, sizeof buf);
+    std::printf("  0x0188 → %s\n", buf);
+    JR_CHECK_CONTAINS(buf, "TORQUE_LIM_UNSET");
+    JR_CHECK_CONTAINS(buf, "ZERO_PENDING_REBOOT");
+    JR_CHECK_CONTAINS(buf, "FEEDBACK_STALE");
+    JR_CHECK(std::strstr(buf, "unknown") == nullptr);
+
+    /* 对照：真正未定义的位仍必须如实标 unknown（不要为了好看把未知位吞掉）。 */
+    joint_status_flags_text(static_cast<std::uint16_t>(0x8000u), buf, sizeof buf);
+    std::printf("  0x8000 → %s\n", buf);
+    JR_CHECK_CONTAINS(buf, "unknown");
+}
+
 int main()
 {
     test_guard_requires_configured_and_paused();
@@ -501,5 +595,7 @@ int main()
     test_calibrate_and_jog();
     test_uncalibrated_chicken_and_egg();
     test_node_id_keeps_accounting_in_sync();
+    test_fault_reset_uses_raw_bitmaps();
+    test_status_flag_names();
     return jrtest::report();
 }

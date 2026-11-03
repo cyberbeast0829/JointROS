@@ -280,8 +280,15 @@ int cmd_status(rclcpp::Node::SharedPtr node, const Opts &o)
     std::printf("%s\n", res->message.c_str());
     if (!res->success) return kOpFailed;
     const auto &s = res->status;
+    /* `degraded` 必须能说出**原因**：cycle_status 是最近一次 `cycle_begin()` 的原始
+       SDK 状态码（0 = OK），entered_estop 说明是否曾进入急停。
+       只打一个 bool 时，现场看到 "degraded=1" 完全无从下手（真机上撞到过）。 */
     std::printf("  bus=%s link_up=%d nodes_online=%u degraded=%d\n", s.bus.c_str(),
                 s.link_up ? 1 : 0, static_cast<unsigned>(s.nodes_online), s.degraded ? 1 : 0);
+    if (s.degraded) {
+        std::printf("    degraded reason: cycle_status=%d entered_estop=%d\n",
+                    static_cast<int>(s.cycle_status), s.entered_estop ? 1 : 0);
+    }
     std::printf("  tx=%u rx=%u tx_failed=%u rx_dropped=%u keepalive=%u link_errors=%u\n",
                 s.tx_frames, s.rx_frames, s.tx_failed, s.rx_dropped, s.keepalive_sent,
                 s.link_errors);

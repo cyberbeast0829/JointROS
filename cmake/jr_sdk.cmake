@@ -96,3 +96,60 @@ function(jr_locate_jsdk)
         "  - -DJRSDK_SOURCE_DIR=/path/to/JointSDK (source integration), or\n"
         "  - -DJRSDK_GIT_REPOSITORY=<url> [-DJRSDK_GIT_TAG=<tag>] (CI).")
 endfunction()
+
+# ============================================================================
+#  jr_require_sdk_api —— 编译前就把"SDK 太旧"报出来（而不是留一个链接错误）
+# ============================================================================
+#  为什么要这个：我们用到的新 API（`jsdk_hal_slcan_open_ex()`、
+#  `jsdk_joint_fault_reset_wait()`、`JSDK_JF_ZERO_PENDING_REBOOT`）在旧 SDK 里
+#  **根本不存在**。那种情况下 `cmake` 能过、编译能过，最后卡在
+#  `undefined reference to jsdk_hal_slcan_open_ex` —— 现场看到的是一屏链接错误，
+#  而真正的原因只有一句话："你的 JointSDK 需要更新到 <commit>"。
+#  ⇒ 在配置阶段读公共头，缺符号就 FATAL_ERROR 并点名需要的上游提交。
+#
+#  ⚠ 找不到头就**跳过**检查（不改变原有安装模式的可用性）：检查是为了给出更好的
+#    错误信息，不是为了新增一条硬依赖。
+function(jr_require_sdk_api)
+    if(NOT TARGET ${JR_SDK_TARGET})
+        return()
+    endif()
+    get_target_property(_incs ${JR_SDK_TARGET} INTERFACE_INCLUDE_DIRECTORIES)
+    if(NOT _incs)
+        return()
+    endif()
+
+    set(_hdr "")
+    foreach(_inc IN LISTS _incs)
+        if(EXISTS "${_inc}/joint_sdk/joint_sdk.h")
+            set(_hdr "${_inc}/joint_sdk/joint_sdk.h")
+            break()
+        endif()
+    endforeach()
+    if(_hdr STREQUAL "")
+        return()
+    endif()
+    get_filename_component(_incdir "${_hdr}" DIRECTORY)
+    get_filename_component(_incdir "${_incdir}" DIRECTORY)
+
+    file(READ "${_hdr}" _sdk_h)
+    set(_builtin "${_incdir}/joint_sdk/jsdk_hal_builtin.h")
+    if(EXISTS "${_builtin}")
+        file(READ "${_builtin}" _sdk_b)
+        string(APPEND _sdk_h "${_sdk_b}")
+    endif()
+
+    foreach(_need
+            "jsdk_hal_slcan_open_ex"        # SDK 79ba820：slcan 仲裁段速率
+            "jsdk_joint_fault_reset_wait"   # SDK 7055e89：可等待的故障复位
+            "JSDK_JF_ZERO_PENDING_REBOOT")  # SDK 70507ed：状态位
+        if(NOT _sdk_h MATCHES "${_need}")
+            message(FATAL_ERROR
+                "JointSDK is too old: '${_need}' is missing from ${_hdr}.\n"
+                "  JointROS v0.23 needs JointSDK >= b31e5d6..7055e89 (2026-11-03):\n"
+                "    - 79ba820 jsdk_hal_slcan_open_ex()      (slcan 仲裁段速率真正下发)\n"
+                "    - 7055e89 jsdk_joint_fault_reset_wait() (fault-reset 三个根因)\n"
+                "    - 70507ed JSDK_JF_ZERO_PENDING_REBOOT   (状态位)\n"
+                "  Update your JointSDK checkout / installed package and re-configure.")
+        endif()
+    endforeach()
+endfunction()

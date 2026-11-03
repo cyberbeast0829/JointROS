@@ -368,8 +368,15 @@ Status BusRuntime::open(const BusCfg &bus, std::uint32_t period_ns, const OpenOp
 
     case HalKind::kSlcan:
 #if JR_HAS_HAL_SLCAN
-        hst = jsdk_hal_slcan_open(&hal_->hal, &hal_->handle, bus_.channel, bus_.serial_baud,
-                                  bus_.is_fd ? bus_.data_bitrate : 0u);
+        /* ⚠ 必须用 `_ex`：旧 `jsdk_hal_slcan_open()` 的签名里**没有**仲裁段速率，
+           传进来的 `nominal_bitrate` 会在参数列表处就丢掉 —— 现场表现是
+           “配置写了 500k、适配器还在 1M”，而总线上一片死寂、没有任何报错
+           （SDK 侧同一个 bug 见 `79ba820`）。
+           `bitrate_explicit == false` 时传 0 = **完全不碰**适配器配置：
+           默认 1 Mbit 是协议默认，不是“要改你的适配器”。 */
+        hst = jsdk_hal_slcan_open_ex(&hal_->hal, &hal_->handle, bus_.channel, bus_.serial_baud,
+                                     bus_.bitrate_explicit ? bus_.nominal_bitrate : 0u,
+                                     bus_.is_fd ? bus_.data_bitrate : 0u);
 #else
         hst = JSDK_ERR_UNSUPPORTED;
 #endif
@@ -1006,46 +1013,74 @@ Status BusRuntime::fault_reset(const unsigned *idx, unsigned n, Result *res) noe
 
     bool any_fault = false;
     for (unsigned k = 0u; k < sel_count; ++k) {
-        const unsigned j = sel[k];
-        if (jsdk_joint_is_fault(joints_[j]) != 0) any_fault = true;
-        jsdk_joint_request_fault_reset(joints_[j]);   /* 非阻塞：需要跑周期才落地 */
-    }
-    if (!any_fault) {
-        if (res != nullptr) res->set(Status::kOk, Advice::kNone, "bus '%s': no fault latched", bus_.name);
-        return Status::kOk;
+        if (jsdk_joint_is_fault(joints_[sel[k]]) != 0) any_fault = true;
     }
 
-    /* 跑若干周期让 SDK 走完 CLEAR_ERRORS → START_MOTOR 的请求队列。 */
-    const std::uint64_t t0 = now_ns();
-    const std::uint64_t budget_ns = 300ull * 1000000ull;
-    bool cleared = false;
-    while (now_ns() - t0 < budget_ns) {
-        (void)jsdk_context_cycle_begin(ctx_, now_ns());
-        (void)jsdk_context_cycle_end(ctx_);
-        cleared = true;
-        for (unsigned k = 0u; k < sel_count; ++k) {
-            if (jsdk_joint_is_fault(joints_[sel[k]]) != 0) {
-                cleared = false;
-                break;
+    /* ---- 阻塞清故障：**必须**用 SDK 的可等待版本（SDK `7055e89`）----
+     *
+     * 以前这里自己跑 `cycle_begin/cycle_end` 并用 `jsdk_joint_is_fault()` 当判据，
+     * 那是三个独立缺陷的叠加（真机实测）：
+     *  ① `CLEAR_ERRORS(0x65)` 清不掉某些位（如 `axis0.error` 的 CAN_BUS_FAILED），
+     *     能清掉它的是**写 `axis0.error = 0`**（描述符里它是可写端点）；
+     *  ② `feedback().axis_error` 是 `0x45` 查询的**快照**，之后不会自己刷新
+     *     ⇒ 只推状态机、不重查，永远读到旧值；
+     *  ③ `is_fault()` 是 `mit_err`/心跳/0x45 三者的**并集**，而前两者是上一帧的
+     *     历史快照 ⇒ 设备已经干净了，我们仍然报“清不掉”。
+     *  ⇒ 症状：`fault-reset` 报失败，而直接 `write axis0.error 0` 一次就清掉。
+     *
+     * `jsdk_joint_fault_reset_wait()` 把这三步（推状态机 → 回退写锁存位 → 重查
+     * 0x45 再判）做成一个函数，并给出**如实**的结论。它内部用
+     * `jsdk_context_poll()` 推进，不要求调用者自己跑周期。
+     *
+     * ⚠ **不用 `any_fault` 当闸门**：那等于用同一个会撒谎的并集来决定“要不要清”。
+     *  设备锁存了错误、但 `is_fault()` 还没采样到时（还没发过 0x45 / 控制帧），
+     *  旧写法会直接回一句“no fault latched”而**根本不去清**。
+     *  `fault-reset` 是用户显式点的动作（需 confirm），设备干净时调用它是幂等的
+     *  —— 与 SDK 的 CLI/Python 一致，总是走一遍。
+     *
+     * ⚠ 它仍是**阻塞**的配置期 API ⇒ 调用方必须持有总线所有权（服务层用
+     *  `open_window()` 暂停 tick 组后再调；直接对运行中的 tick 组调用会与 RT 线程
+     *  争同一份 context）。 */
+    constexpr std::uint32_t kFaultResetBudgetMs = 2000u;
+    bool cleared = true;
+    char first_fail[256] = {};
+    for (unsigned k = 0u; k < sel_count; ++k) {
+        const unsigned j = sel[k];
+        const jsdk_status_t frs = jsdk_joint_fault_reset_wait(joints_[j], kFaultResetBudgetMs);
+        if (frs != JSDK_OK) {
+            cleared = false;
+            if (first_fail[0] == '\0') {
+                std::snprintf(first_fail, sizeof(first_fail), "joint %u: %s (%s)", j,
+                              jsdk_status_string(frs), jsdk_context_last_error(ctx_));
             }
         }
-        if (cleared) break;
-        std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
     if (!cleared) {
         if (res != nullptr) {
-            /* 实测（fw 1545）：estop 锁存后 CLEAR_ERRORS **清不掉**，只有 RESET_DEVICE 或断电。 */
+            /* 仍保留 kNeedsDeviceReset：服务层据此（且仅当请求允许时）走软复位。
+               ⚠ 不要在这里断言“只有 ESTOP 锁存清不掉” —— 那是个未经验证的泛化；
+               能说的是：SDK 已尝试 `CLEAR_ERRORS` + 写锁存位 + 重查 0x45，
+               仍有非零原始错误位 ⇒ 故障原因还在（物理原因 / 需重启）。 */
             res->set(Status::kTimeout, Advice::kNeedsDeviceReset,
-                     "bus '%s': fault did not clear via CLEAR_ERRORS. Measured behaviour (fw 1545): "
-                     "an ESTOP-latched error cannot be cleared this way — use ResetDevice "
-                     "(soft reset) or power-cycle the joint.",
-                     bus_.name);
+                     "bus '%s': fault did not clear. The SDK already tried CLEAR_ERRORS, "
+                     "writing the latch bits to 0 and re-querying 0x45 -- non-zero raw error "
+                     "bits remain (%s). Check the physical cause, or use ResetDevice "
+                     "(soft reset) / power-cycle the joint.",
+                     bus_.name, first_fail[0] != '\0' ? first_fail : "unknown");
         }
         return Status::kTimeout;
     }
     if (res != nullptr) {
-        res->set(Status::kOk, Advice::kNone, "bus '%s': faults cleared", bus_.name);
+        /* 如实区分"原本有故障、已清"与"本来就没有"（两者都做了幂等的一轮）。 */
+        res->set(Status::kOk, Advice::kNone,
+                 /* ⚠ 措辞要分清"我知道什么"：`is_fault()` 是并集快照，它说 0
+                    不代表设备里没有锁存位（可能还没被采样到）—— 所以这里只能说
+                    "SDK 没有报告故障"，不能说"没有故障"。设备侧真值仍要看原始位图。 */
+                 any_fault ? "bus '%s': faults cleared (raw 0x45 bitmaps all zero)"
+                           : "bus '%s': reset completed; the SDK had no fault to report "
+                             "(is_fault()==0 -- raw bits are re-checked by the SDK)",
+                 bus_.name);
     }
     return Status::kOk;
 }
@@ -1252,6 +1287,15 @@ void joint_status_flags_text(std::uint16_t flags, char *out, std::size_t cap) no
         {JSDK_JF_TX_FAILED, "TX_FAILED"},
         {JSDK_JF_SCALE_INVALID, "SCALE_INVALID"},
         {JSDK_JF_WATCHDOG_UNVERIFIED, "WATCHDOG_UNVERIFIED"},
+        /* ⚠ 这两项以前漏了，于是诊断里只看到 `0x80(unknown)` / `0x100(unknown)` ——
+           而它们恰恰是最需要人看懂的两个：
+           ① TORQUE_LIM_UNSET（SDK `df48bae`，F33）：客户端没给力矩上限、SDK 退到
+              固件默认量级 —— 电机**能转但力矩被限制**，不是故障；
+           ② ZERO_PENDING_REBOOT（SDK `70507ed`）：MIT 词汇的 SET_ZERO 已写入零点
+              存储（并落 Flash），但**多圈累计位置要重启后**才归零 ——
+              以前会显示成“未知位”，客户会以为设备坏了。 */
+        {JSDK_JF_TORQUE_LIM_UNSET, "TORQUE_LIM_UNSET"},
+        {JSDK_JF_ZERO_PENDING_REBOOT, "ZERO_PENDING_REBOOT"},
     };
     for (const auto &n : kNames) {
         if ((flags & n.bit) == 0u) continue;
@@ -1914,6 +1958,10 @@ void BusRuntime::fill_snapshot(StateSnapshot &s, unsigned bus_index, unsigned jo
     std::snprintf(b.name, sizeof(b.name), "%s", bus_.name);
     b.bus_load_estimate = report_.plan.load;
     b.degraded = (last_cycle_status_ != 0) || entered_estop_;
+    /* 把 degraded 的**原因**一并带出去：只给一个 bool，现场只知道“降级了”、
+       不知道该看哪一项（真机上就撞到过：链路全绿却恒为 degraded=1）。 */
+    b.cycle_status = last_cycle_status_;
+    b.entered_estop = entered_estop_;
     std::snprintf(b.last_note, sizeof(b.last_note), "%s", snapshot_note_);
 
     for (unsigned j = 0u; j < joint_count_; ++j) {

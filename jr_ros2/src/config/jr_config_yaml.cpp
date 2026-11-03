@@ -291,6 +291,9 @@ bool read_buses(Loader &L, const YAML::Node &jr, Config &c, std::vector<std::str
             if (!keys_ok(L, br, where + ".bitrate", {"nominal", "data"})) return false;
             if (!need_u32(L, br, where + ".bitrate", "nominal", out.nominal_bitrate)) return false;
             if (!need_u32(L, br, where + ".bitrate", "data", out.data_bitrate)) return false;
+            /* 显式给了 bitrate 才允许 slcan 在打开通道时下发 `S<n>` 去改适配器
+               （见 BusCfg::bitrate_explicit 的注释：默认值不是“要改你的适配器”）。 */
+            out.bitrate_explicit = true;
         }
 
         /* 反馈策略可以在总线上覆盖全局 feedback（总线上没有就沿用全局）。 */

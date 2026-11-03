@@ -264,6 +264,18 @@ struct BusCfg {
     bool         is_fd = false;
     std::uint32_t nominal_bitrate = 1000000u;
     std::uint32_t data_bitrate = 5000000u; /**< is_fd=false 时忽略 */
+    /** 配置里**显式**写了 `bitrate:` 块吗（默认 false）。
+     *
+     * @par 为什么需要它（slcan 专用）
+     *  只有 slcan 后端需要在**打开通道**时下发 `S<n>` 去改适配器自己的仲裁段速率；
+     *  SocketCAN/PCAN 的速率由内核/驱动侧配置，我们不动。
+     *  ⚠ 而 `S<n>` **会改适配器设置**（写它的 RAM/EEPROM）—— 如果用户只是没写
+     *  `bitrate:`（用默认 1 Mbit），我们**不该**去改一台已被厂家工具配好的适配器：
+     *  那不是“应用配置”，而是**破坏现场**（原本 500k 的适配器被切到 1M 后设备
+     *  会直接从总线上消失，且没有任何报错）。
+     *  ⇒ 与 SDK 同一条理由：默认 1 Mbit 是**协议默认**，不是“要改你的适配器”。
+     *  只有 YAML 里真的写了 `bitrate:`（或 `jr_gen_config` 生成时写出该块）才为 true。 */
+    bool         bitrate_explicit = false;
 
     unsigned     joint_count = 0u;
     JointCfg     joints[kMaxJointsPerBus] = {};
