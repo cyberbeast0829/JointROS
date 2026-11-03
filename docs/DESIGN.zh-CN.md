@@ -2106,6 +2106,27 @@ ctest `tools_virtual`（`jr_ros2/test/test_tools.sh`，**7 组检查 / 0 失败*
     ⚠ 该用例**必须同时有上下界语境**：只判"小于 100"会漏掉恢复路径，只判"接近窗口"
     会在 Linux 上假红。
 
+    ⚠⚠ **首版修法引入过一个更严重的回归（真机抓到，已修）**：`reset_epoch()` 第一版
+    写成 `start_ns_ = now`，而 `deadline_of(n) = start + n*period` —— 此时 `n`
+    （`tick_index_`，同时是统计用的单调计数器）已经很大。真机跑到 **35000 tick** 时
+    resume ⇒ 下一拍被排到 **35 秒后** ⇒ RT 线程睡死、`pause()` 报
+    *"the tick thread did not hand over ownership"*（5 s 超时），节点**彻底失去控制**；
+    同时那段空转把 `tick_overruns` 刷到 14 万（看起来像"slcan 带宽不够"，其实是假的）。
+    修法：`Sleeper` 增加 `epoch_index_`，`deadline_of()` 以它为原点
+    （`start + (n - epoch_index_)*period`），`reset_epoch(now, tick_index)` 同时记录原点。
+    用例 `test_tick_overruns` 第 ④ 条专门守它（恢复后 300 ms 必须推进 >100 拍，并再次
+    pause 成功）；变异回"忘记换算 index" ⇒ **0 拍/300 ms**、用例立刻红。
+    ⚠ 这一条也说明：③ 只检查**丢拍计数**，对"线程被排到很远的将来"完全无感（它照样是 0）。
+
+    **真机链路/时序结果（ODrive 关节，用 MIT 力位混合协议控制；slcan CANable，1 Mbit，ID 1，gear=9，fw 0x60b）**：
+    - 只读自检 `jr_hw_verify`：**9 通过 / 2 告警 / 0 失败**（告警：Classic 带宽、slcan 不适合高频控制）；
+    - 描述符 38433 字节 / 554 端点；`axis0.requested_state` 存在、无 `action.calibrate`
+      ⇒ 解析为 **ODRIVE** 词汇（`calibrate` 走老路）；
+    - 连续 5 次点动：**9168 TX、overruns=0、tx_failed=0、rx_dropped=0**，
+      达成率 ~874–931 Hz（请求 1 kHz）—— 只说明**链路与时序**健康，**不构成位置精度结论**；
+    - 单位交叉验证：`axis0.encoder.pos_estimate` 3.68954 turns × 2π/9 = 2.5758 rad，
+      与 `JointFeedback.position` 的 2.5761 rad 一致 ⇒ 圈数↔输出 rad 换算正确。
+
     **顺带澄清两条此前的错误归因**（都写进了提交前必须纠正的记录）：
     - **不是 CAN FD 带宽**：对照实验里使能 + 轮询 100 ms 的 10 s 增量是 **0**，
       负载也远未打满 ⇒ 与"总线饱和"无关；

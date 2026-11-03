@@ -51,6 +51,13 @@ std::uint64_t missed(jr::rt::TickGroup &g)
     return (s == nullptr) ? 0u : s->rt.missed_ticks;
 }
 
+/** 已完成周期数 —— 用来断言"恢复后确实还在走拍"（只看丢拍计数看不出线程被排到很远的将来）。 */
+std::uint64_t ticks(jr::rt::TickGroup &g)
+{
+    const jr::StateSnapshot *s = g.acquire_snapshot();
+    return (s == nullptr) ? 0u : s->rt.tick_count;
+}
+
 /** 最小 Config：一个 tick 组 + 一条 `kVirtual` 总线（**不真开设备**，只跑时序）。
  *  ⚠ `bus_count`/`group_count` 必须显式写：`buses[]`/`groups[]` 是定长数组，
  *  不是 vector（这个项目里所有"计数 + 定长数组"的写法都是这个约定）。 */
@@ -215,6 +222,56 @@ int main()
                 const std::uint64_t after = missed(g);
                 g.stop();
                 JR_CHECK(within_window(after - before, paused_ms + 200u));
+            }
+        } else {
+            JR_CHECK_MSG(false, "最小虚拟总线 tick 组起不来");
+        }
+    }
+
+    /* ------------------------------------------------ ④ resume 后**必须继续走拍**：
+     *
+     * 这是真机抓到的回归（比"丢拍数算错"严重得多）：`reset_epoch()` 第一版写成
+     * `start_ns_ = now`，而 `deadline_of(n) = start + n*period`、`n` 此时已经很大
+     * ⇒ 下一拍被排到 `n*period` 之后。真机跑到 35000 tick 时 resume，
+     * **下一拍被排到 35 秒后** ⇒ RT 线程睡死、`pause()` 报
+     * "the tick thread did not hand over ownership"（5 s 超时），整个节点失去控制。
+     *
+     * ③ 只检查丢拍**计数**，对此完全无感（它照样是 0）—— 所以必须单独断言
+     * "tick 数在恢复后确实在增长"。 */
+    JR_CASE("pause+resume 之后 tick 必须继续推进（不能把下一拍排到很远的将来）");
+    {
+        Probe p(1000u);
+        if (p.start()) {
+            jr::rt::TickGroup &g = p.g();
+            jr::Result r{};
+            /* ⚠ 先跑 ~1 s 把 `tick_index_` 拉大：这个 bug 的严重程度与 index 成正比
+               （真机是 35000 ⇒ 35 s）。若只在 index≈80 时测，损坏的版本只多睡 80 ms，
+               300 ms 窗口里照样能凑够 200 拍 —— 用例就会假绿。 */
+            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+            const bool ok = (g.pause(&r, 500u) == jr::Status::kOk);
+            if (!ok) {
+                JR_CHECK_MSG(false, "pause 握手失败");
+            } else {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                g.resume();
+
+                const std::uint64_t t_before = ticks(g);
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                const std::uint64_t t_after = ticks(g);
+                const std::uint64_t delta = t_after - t_before;
+
+                /* 1 kHz × 300 ms ≈ 300 拍；允许宽裕误差，但**绝不允许接近 0**。 */
+                std::printf("  恢复后 300 ms 内推进了 %llu 拍（期望≈300）\n",
+                            static_cast<unsigned long long>(delta));
+                JR_CHECK_MSG(delta > 100u,
+                             "resume 之后 RT 线程没有继续走拍 —— 下一拍的 deadline 被排到了很远的"
+                             "将来（真机上表现为 pause() 5 s 超时、节点失去控制）");
+
+                /* 顺带：恢复后必须还能再次正常进入暂停窗口（这是真机 jog 的下一步）。 */
+                const bool ok2 = (g.pause(&r, 1000u) == jr::Status::kOk);
+                JR_CHECK_MSG(ok2, "恢复后再次 pause 失败 —— tick 线程没有回到正常节奏");
+                if (ok2) g.resume();
+                g.stop();
             }
         } else {
             JR_CHECK_MSG(false, "最小虚拟总线 tick 组起不来");

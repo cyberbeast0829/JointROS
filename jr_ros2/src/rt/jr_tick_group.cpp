@@ -465,7 +465,7 @@ void TickGroup::thread_main() noexcept
             if (since_last > period_ns_) {
                 missed_ticks_ += since_last / period_ns_;
             }
-            sleeper.reset_epoch(t_resume);
+            sleeper.reset_epoch(t_resume, tick_index_);
 
             leave_pause();
             paused = false;

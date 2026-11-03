@@ -70,7 +70,12 @@ public:
     /** 第 n 个 tick 的绝对时刻（无漂移）。 */
     std::uint64_t deadline_of(std::uint64_t tick_index) const noexcept
     {
-        return start_ns_ + tick_index * period_ns_;
+        /* ⚠ 以 `epoch_index_` 为原点：`reset_epoch()` 之后 `tick_index` 可能已经很大
+           （它同时是统计用的**单调**计数器），直接用 `start + n*period` 会把下一拍
+           排到 `n*period` 之后 —— 真机实测：跑到 35000 tick 时 resume，
+           下一拍被排到 **35 秒后**，RT 线程睡死、`pause()` 5 s 超时。 */
+        const std::uint64_t idx = (tick_index > epoch_index_) ? (tick_index - epoch_index_) : 0u;
+        return start_ns_ + idx * period_ns_;
     }
 
     /** 把时间基准重新对齐到"现在"：此后第 0 拍 = 此刻。
@@ -82,7 +87,11 @@ public:
      *  加一次（实测：暂停 200 ms 后增量 20,706 = 期望 103 倍；真机 jog 2 s 后
      *  2,050,096）。`reset_epoch()` 让暂停区间只结清一次，之后恢复正常节奏。
      */
-    void reset_epoch(std::uint64_t now) noexcept { start_ns_ = now; }
+    void reset_epoch(std::uint64_t now, std::uint64_t tick_index) noexcept
+    {
+        start_ns_ = now;
+        epoch_index_ = tick_index;
+    }
 
     /** 睡到绝对时刻（提前醒来会继续等；已过期立即返回）。 */
     void sleep_until(std::uint64_t deadline_ns) noexcept;
@@ -90,6 +99,8 @@ public:
 private:
     std::uint64_t period_ns_ = 0u;
     std::uint64_t start_ns_ = 0u;
+    /** `start_ns_` 对应的 `tick_index` 原点（见 `deadline_of()` / `reset_epoch()`）。 */
+    std::uint64_t epoch_index_ = 0u;
     void *timer_ = nullptr;   /**< Windows: HANDLE；Linux: 不用 */
 };
 
